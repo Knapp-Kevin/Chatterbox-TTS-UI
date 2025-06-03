@@ -1,0 +1,25 @@
+{
+  "projectName": "Chatterbox-TTS-UI",
+  "projectOwner": "AcTePuKc",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": true,
+  "commitConvention": "none",
+  "contributors": [
+    {
+      "login": "lowkeytea",
+      "name": "lowkeytea",
+      "avatar_url": "https://avatars.githubusercontent.com/u/185973220?v=4",
+      "profile": "https://github.com/lowkeytea",
+      "contributions": [
+        "code"
+      ]
+    }
+  ],
+  "contributorsPerLine": 7,
+  "linkToUsage": false
+}
