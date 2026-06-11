@@ -1,6 +1,16 @@
 # Chatterbox TTS - One Click Installer & UI
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors-)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-This project provides a user-friendly PySide6 interface for Resemble AI's open-source **Chatterbox TTS** model, along with a one-click (Windows `run.bat`) (Mac OS `run.sh`) installer to set up the environment and dependencies.
+This project provides a PySide6 desktop interface for Resemble AI's open-source **Chatterbox TTS** models, along with a Windows-first setup flow that prepares the environment, installs a suitable PyTorch runtime, and launches the app.
+
+Current recommended launcher flow:
+
+*   `run.bat`: launches the app once after running environment setup.
+*   `setup_env.bat`: prepares or repairs the local environment and writes installer logs.
+
+`run.sh` is currently **legacy / experimental** and does not match the Windows setup flow yet.
 
 
 ## Table of Contents
@@ -28,44 +38,26 @@ This project provides a user-friendly PySide6 interface for Resemble AI's open-s
 ## Language Support
 
 <details>
-<summary><strong>Official Model Capabilities (v0.1.1)</strong> - Click to Expand</summary>
+<summary><strong>Official Model Capabilities (Current UI)</strong> - Click to Expand</summary>
 
-*   The underlying `chatterbox-tts` model (version 0.1.1, as currently used by this project) is primarily designed and trained for **English (US/General Accent)** text-to-speech.
-*   **Other Languages:**
-    *   While the model may attempt to pronounce words from other languages using English phonetics, the results will generally **not sound like native speech** and may be heavily accented or unintelligible.
-    *   Languages using **non-Latin scripts** (e.g., Greek, Cyrillic, Chinese, Korean, Arabic, Hindi) or those with extensive **diacritics/special characters** not common in English are highly likely to cause errors (including potential CUDA errors if character processing fails) or produce completely garbled output.
-*   **Achieving True Multilingual Support:** This would require:
-    *   New models or updated versions from the `chatterbox-tts` **developers** specifically trained or fine-tuned for those languages.
-    *   Community efforts to **fine-tune** the existing model or train new ones on specific language datasets.
-*   **Recommendation:** For reliable and high-quality results, **it is strongly recommended to use English text only** with the current version of the model. It is primarily a research and development tool for English TTS at this stage.
+*   The default shipped model entry is the official `ResembleAI/chatterbox` multilingual backend.
+*   The current upstream multilingual backend exposes these official language IDs:
+    *   `ar`, `da`, `de`, `el`, `en`, `es`, `fi`, `fr`, `he`, `hi`, `it`, `ja`, `ko`, `ms`, `nl`, `no`, `pl`, `pt`, `ru`, `sv`, `sw`, `tr`, `zh`
+*   The UI now includes:
+    *   a backend-aware model selector
+    *   an explicit language selector for multilingual models
+    *   editable `models.json` entries for custom repo testing
+    *   `multilingual_t3_model` support in `models.json` for multilingual entries (`v3` by default, `v2` for older repos if needed)
+*   The app also keeps an optional `Legacy English compatibility` entry for testing the older English-focused loader path.
+*   **Not every Hugging Face repo is compatible.** A repo must match the expected checkpoint layout for the selected backend (`multilingual` or `legacy`), otherwise the UI will show a compatibility error.
 </details>
 
 <details>
-<summary><strong>Community Language Test Observations (Unofficial)</strong> - Click to Expand</summary>
+<summary><strong>Notes on Bulgarian and Custom Models</strong> - Click to Expand</summary>
 
-The following are informal observations on how the current English model (v0.1.1) attempts to handle text from other languages. These are **not endorsements of support** but rather notes on its behavior. Expect a strong English phonetic base and accent.
-
-**⚠️ WARNING: Non-Latin Scripts & Extensive Diacritics ⚠️**
-Attempting to process languages with non-Latin scripts (e.g., Greek, Cyrillic, Hanzi, Hangul) or extensive diacritics can lead to unpredictable behavior, including application errors (like CUDA device-side asserts with Greek text) or completely garbled/silent output. **Proceed with caution and expect instability if testing these.**
-
-*   **English:** ✅ Supported (Primary Language)
-*   **German:** 🗣️ Produces heavily English-accented speech. Does not sound like native German.
-*   **French:** 🗣️ Produces heavily English-accented speech.
-*   **Spanish:** 🗣️ Produces heavily English-accented speech.
-*   **Italian:** 🗣️ Produces heavily English-accented speech.
-*   **Romanian:** 🗣️ Produces heavily English-accented speech.
-*   **Dutch:** 🚫 Generally unintelligible or sounds nothing like Dutch.
-*   **Swedish:** 🚫 Generally unintelligible or sounds nothing like Swedish.
-*   **Polish:** *(Latin script with diacritics)* - 🗣️ Likely heavily English-accented; intelligibility may vary. *(You can update with your specific test result here if you do one, e.g., "Poor intelligibility, strong English accent.")*
-*   **Turkish:** *(Latin script with some unique characters)* - 🚫 Generally unintelligible or heavily English-ified.
-*   **Czech:** *(Latin script with diacritics)* - 🗣️ Likely heavily English-accented; intelligibility may vary. *(Update with test result)*
-*   **Bulgarian:** *(Cyrillic script)* - 🛑 **HIGHLY UNSUPPORTED.**
-*   **Russian, Serbian, Ukrainian (other Cyrillic):** 🛑 **HIGHLY UNSUPPORTED.**
-*   **Korean (Hangul):** 🛑 **HIGHLY UNSUPPORTED.** May attempt to pronounce characters as English letters.
-*   **Chinese (Mandarin - Hanzi):** 🛑 **HIGHLY UNSUPPORTED.** May attempt to pronounce characters as English letters or Pinyin with English phonetics.
-*   **Greek (Greek script):** 🛑 **HIGHLY UNSUPPORTED & POTENTIALLY UNSTABLE.** Can lead to application errors (CUDA asserts).
-
-*(This list is not exhaustive. Feel free to report your findings for other languages if you experiment, but please note the model's English-centric design.)*
+*   **Bulgarian is not part of the current official multilingual language list** exposed by `ResembleAI/chatterbox`.
+*   The UI supports custom repos through `models.json`, but that does **not** guarantee the repo is usable with the selected backend.
+*   The included disabled example entries in `models.json` are there to show users how to add custom multilingual or legacy repos without editing Python code.
 </details>
 
 ## Features
@@ -76,24 +68,31 @@ Attempting to process languages with non-Latin scripts (e.g., Greek, Cyrillic, H
 *   **Simple PySide6 Interface:**
     *   Text input for speech synthesis.
     *   Load reference audio files (`.wav`, `.mp3`, `.flac`) for voice cloning.
+    *   Model repo picker backed by `models.json`.
+    *   Explicit language selector for multilingual models.
+    *   `Open models.json` and `Reload Model List` actions.
+    *   `Model Details`, `Custom Models Help`, `HF Token...`, and `Sampling...` dialogs for advanced multilingual controls.
+    *   Per-model notes and language-specific test presets.
     *   Adjustable parameters:
         *   Exaggeration
         *   CFG/Pace
         *   Temperature
         *   Random Seed (0 for random)
+        *   Advanced sampling settings: repetition penalty, min-p, and top-p
     *   Audio playback controls (Play/Pause/Resume, Stop, Seekable Playhead).
-    *   History of generated audio files with double-click to play.
+    *   Split lower panel with generated file history and an in-app `Activity Log`.
     *   Status updates for model loading, generation,  playback and time elapsed.
     *   Option to auto-play audio after generation.
 *   **Smart Text Chunking:**
     *   Utilizes NLTK for sentence tokenization.
     *   Long sentences are intelligently split at spaces to avoid cutting words, ensuring better quality for stitched audio.
     *   Handles long text inputs by generating and stitching audio chunks.
-*   **One-Click Installer (`run.bat` for Windows):**
+*   **Windows Setup Flow (`run.bat` + `setup_env.bat`):**
     *   Uses `uv` (a fast Python package installer and resolver) for environment setup.
     *   Automatically creates a Python virtual environment (`.venv`).
-    *   Installs all necessary dependencies from a lock file (`requirements.lock.txt`) for reproducibility.
-    *   Detects your CUDA version (if NVIDIA GPU is present) and installs the appropriate PyTorch build (including torchvision and torchaudio) for GPU acceleration. Falls back to CPU if CUDA is not found.
+    *   Installs base application dependencies from `requirements.lock.txt`.
+    *   Detects your NVIDIA CUDA runtime and installs a suitable PyTorch build separately from the main dependency lock.
+    *   Writes timestamped installer logs to the `logs/` folder.
     *   Downloads necessary NLTK resources (`punkt` for sentence tokenization).
 *   **Output Management:**
     *   Saves generated audio to a `chatterbox_outputs` subdirectory.
@@ -106,8 +105,7 @@ Attempting to process languages with non-Latin scripts (e.g., Greek, Cyrillic, H
 <details>
 <summary>Click to expand</summary>
 
-1.  **Python:** Version 3.11 is recommended and targeted by the `run.bat` script. Other Python 3.8+ versions might work but ensure it's added to your system PATH.
-    *   You can modify the Python version in `run.bat` if needed (variable `PYTHON_VERSION`, though currently it uses `python3.11` directly in the `uv venv` command).
+1.  **Python:** Version 3.11 is the current supported target for the Windows launcher flow.
 2.  **`uv`:** This ultra-fast Python package manager.
     *   Installation instructions: [https://github.com/astral-sh/uv#installation](https://github.com/astral-sh/uv#installation)
 3.  **FFmpeg:** Required by Qt Multimedia for playing various audio formats (including the generated `.wav` files).
@@ -130,29 +128,44 @@ Attempting to process languages with non-Latin scripts (e.g., Greek, Cyrillic, H
     ```
     Or download the ZIP and extract it.
     (Remove the screenshot or print it as a memory)
-2.  **Run the Installer:**
+2.  **Run the Launcher:**
     *   Simply double-click `run.bat`.
     *   This script will:
-        *   Check for Python and `uv`.
-        *   Create a virtual environment in a folder named `.venv`.
-        *   Install all Python dependencies using `uv pip sync` from `requirements.lock.txt`.
-        *   Run `install_torch.py` to install the correct PyTorch version for your system (CUDA or CPU).
-        *   Launch the `main.py` application.
+        *   Call `setup_env.bat` to prepare or repair the environment.
+        *   Create `.venv` if needed.
+        *   Install or refresh base dependencies.
+        *   Run `install_torch.py` only when the Torch runtime needs to be installed or repaired.
+        *   Launch the `main.py` application once setup succeeds.
 
-    *   The first time setup might take a few minutes depending on your internet speed, especially for downloading PyTorch and other dependencies. Subsequent launches will be much faster.
+    *   **Important:** the first launch can take several minutes.
+        *   The UI may not appear immediately.
+        *   The model can still be downloading after the app window appears.
+        *   Installer decisions and failures are written to `logs\installer_YYYYMMDD_HHMMSS.log`.
+        *   Pre-window startup crashes are written to `logs\app_startup_YYYYMMDD_HHMMSS.log`.
+    *   Subsequent launches should be much faster, but the launcher still performs quick environment checks before starting the app.
 
 3.  **Using the Application (`main.py`):**
-    *   **Load Model:** The model attempts to load automatically on startup. You can use the "Reload Model" button if needed. Status bar will indicate progress.
+    *   **Load Model:** The default model attempts to load automatically on startup. Use `Load Selected Model` to switch or reload.
+    *   **Experimental multilingual models:** enable this option to expose the full `models.json` list instead of only the recommended default entry.
+    *   **Custom repos:** use `Open models.json`, edit the entries you want, then press `Reload Model List`.
+    *   **Optional HF token:** use `HF Token...` if you want authenticated Hugging Face downloads and higher rate limits.
+        *   Get one from [Hugging Face Settings > Access Tokens](https://huggingface.co/settings/tokens).
+        *   Create a token with `Read` access.
+        *   Paste it into the app.
+        *   It applies to future Hugging Face downloads in the current session, but restarting the app is recommended so startup downloads also use it cleanly.
+        *   The token is saved locally in `app_settings.json`, which is ignored by git and should not be shared.
     *   **Enter Text:** Type or paste the text you want to synthesize. Long texts will be automatically chunked and stitched.
     *   **Reference Audio (Optional):** Click "Browse Reference Audio..." to select a `.wav`, `.mp3`, or `.flac` file to clone its voice characteristics.
     *   **Adjust Parameters:** Use the sliders and seed input to fine-tune the output.
         *   **CFG/Pace:** Lower values (e.g., 0.2-0.4) can slow down speech and improve pacing.
         *   **Exaggeration:** Default 0.5 is usually good. Higher values can be more expressive but also faster.
+        *   **Sampling...:** Opens advanced multilingual sampling controls for repetition penalty, min-p, and top-p.
     *   **Generate Audio:** Click "Generate Audio". The status bar will show progress if the text is split into multiple chunks.
     *   **Playback:**
         *   If "Auto-play" is checked, audio plays automatically.
         *   Use the Play/Pause, Stop, and seek slider.
         *   Double-click files in the "Generated Files History" to play them.
+        *   Watch the `Activity Log` panel for model downloads, warnings, and tracebacks.
     *   Generated files are saved in the `chatterbox_outputs` folder.
 </details>
 
@@ -160,12 +173,11 @@ Attempting to process languages with non-Latin scripts (e.g., Greek, Cyrillic, H
 <details>
 <summary>Click to expand</summary>
 
-### macOS / Apple Silicon (M1/M2/M3) Users:
+### macOS / Linux
 
-*   The application includes logic to detect and attempt to use MPS (Metal Performance Shaders) for GPU acceleration on Apple Silicon Macs if a compatible PyTorch version is installed.
-*   To enable this, ensure you install a PyTorch build with MPS support. For most users on Apple Silicon, running `uv pip install torch torchvision torchaudio` within the activated virtual environment (after other dependencies) should install a compatible version.
-*   **Current Status of MPS in `chatterbox-tts`:** The level of official MPS support within the `chatterbox-tts` library (version `0.1.1`, which this project currently uses) is not fully confirmed by its developers. While this UI attempts to enable MPS, successful GPU acceleration on macOS depends on the library's internal compatibility. If you encounter issues or it seems to be running on CPU, it may be due to limitations in the current `chatterbox-tts` version's MPS support. Future updates to the `chatterbox-tts` library may improve this.
-*   The `run.sh` script will likely install a CPU-only version of PyTorch by default via `install_torch.py` (which is CUDA-focused). Manual PyTorch installation is recommended for MPS.
+*   `run.sh` is currently **legacy / experimental** and has not been updated to match the current Windows launcher flow.
+*   If you are on macOS or Linux, prefer a manual setup for now.
+*   Apple Silicon / MPS users should install a suitable PyTorch build manually after the base dependencies are installed.
 If you prefer not to use the `run.bat` script or are on a different OS:
 
 1.  Ensure **Python 3.11** (or compatible) and **`uv`** are installed and in your PATH.
@@ -198,11 +210,16 @@ If you prefer not to use the `run.bat` script or are on a different OS:
 <summary>Click to expand</summary>
 
 *   `main.py`: The main PySide6 application script.
-*   `run.bat`: Windows batch script for one-click setup and launch.
-*   `run.sh`: MacOS/Linux batch script for one-click setup and launch.
+*   `run.bat`: Windows launcher. Runs setup, then starts the app once.
+*   `launch_app.py`: Startup wrapper that logs pre-GUI crashes to `logs/app_startup_*.log`.
+*   `setup_env.bat`: Windows environment setup and repair script.
+*   `run.sh`: Legacy / experimental shell launcher.
+*   `model_backends.py`: Backend-aware Chatterbox model loading adapter.
+*   `models.json`: Editable model list for official and custom repo entries.
 *   `requirements.in`: High-level list of direct Python dependencies.
 *   `requirements.lock.txt`: Fully resolved list of all Python dependencies with pinned versions for reproducible environments (generated by `uv pip compile`).
 *   `install_torch.py`: Python script to detect CUDA and install the appropriate PyTorch build.
+*   `logs/`: Installer logs written by `setup_env.bat`.
 *   `chatterbox_outputs/`: Directory where generated audio files are saved (created automatically).
 *   `.venv/`: Python virtual environment (created automatically by `run.bat` or manually).
 </details>
@@ -218,61 +235,74 @@ If you prefer not to use the `run.bat` script or are on a different OS:
     python -m nltk.downloader punkt
     python -m nltk.downloader punkt_tab
     ```
-*   **`ChatterboxTTS library not found`**: Ensure `uv pip sync requirements.lock.txt` completed successfully.
+*   **First launch is slow / the app seems stuck:** This is expected on a clean setup. The environment, PyTorch runtime, and model files may still be downloading. Check the console and the newest file in `logs/`.
+*   **The app started on CPU but you have an NVIDIA GPU:** Close the app and run `run.bat` again from a console so you can watch the installer output. If it still fails, attach the newest file from `logs/installer_*.log`.
+*   **The app still fails after a previous broken install:** Delete `.venv` and run `run.bat` again for a clean rebuild.
+*   **`ChatterboxTTS library not found` / model backend import failed**: Ensure `setup_env.bat` completed successfully and inspect the newest installer log.
+*   **The app never opens a window / closes before UI appears:** Check the newest `logs/app_startup_*.log` file. This captures import-time and pre-window startup crashes that would otherwise be hidden by `pythonw.exe`.
 *   **No audio playback / Media Player Errors**: Make sure FFmpeg is correctly installed and its `bin` directory is in your system's PATH.
 *   **Slow Generation**: Generating speech for long texts by stitching multiple chunks will take time. The number of chunks depends on the text length and sentence structure. Experiment with the `CFG/Pace` and `Exaggeration` sliders for speech rate.
+*   **Custom repo does not load:** Verify that the repo layout matches the selected backend in `models.json`. Not every Hugging Face repo is a drop-in replacement.
+*   **`dicta_onnx not available - Hebrew text processing skipped`**: This is an optional Hebrew preprocessing warning from the upstream stack. Generation can still work, but Hebrew normalization may be reduced unless the optional dependency is available in the environment.
+*   **`Warning: You are sending unauthenticated requests to the HF Hub`**: Optional. Set a token from `HF Token...` in the app if you want authenticated downloads and higher rate limits. A `Read` token is enough.
+*   **Multilingual V3 settings appear ignored:** Rebuild the environment after changing dependency sources or deleting `.venv`. Older installed `chatterbox-tts` builds can fall back to the package default multilingual loader and ignore explicit V3 T3 selection.
 </details>
 
 ## Important Notes on PyTorch Installation & Reproducibility
 <details>
 <summary>Click to expand</summary>
 
-This project aims for both ease of use and reproducible environments. Here's how PyTorch (a core dependency for `chatterbox-tts`) is handled:
+This project aims for both ease of use and predictable installs. Here's how PyTorch is handled:
 
 1.  **Dependency Locking (`requirements.lock.txt`):**
-    *   We use `uv` (a fast Python package manager) and a `requirements.lock.txt` file. This file is generated by the command `uv pip compile requirements.in -o requirements.lock.txt`.
-    *   It pins the versions of most dependencies (like `PySide6`, `nltk`, `chatterbox-tts`, and its non-PyTorch sub-dependencies) to ensure that everyone gets the same versions that were tested with this UI.
-    *   For PyTorch itself, `chatterbox-tts` requires a specific version (e.g., `torch==2.6.0`). The `requirements.lock.txt` file will include an entry for this version of PyTorch. When `uv pip sync requirements.lock.txt` runs as part of the setup, it will install this locked version, which is typically a general-purpose build (e.g., CPU-only or a base CUDA version if available on PyPI).
+    *   We use `uv` and a `requirements.lock.txt` file to pin the main application dependencies.
+    *   The Windows setup flow now filters the Torch trio (`torch`, `torchaudio`, `torchvision`) out of the runtime dependency install so they can be managed separately.
 
 2.  **Hardware-Specific PyTorch Build (`install_torch.py`):**
-    *   After the initial dependencies are synced from `requirements.lock.txt`, the `run.bat` script (or manual setup) executes `python install_torch.py`.
+    *   After the base dependencies are installed, `setup_env.bat` executes `python install_torch.py` when needed.
     *   This specialized script:
         *   Detects if you have an NVIDIA GPU and your CUDA version.
-        *   Constructs the correct command to install a PyTorch build optimized for your specific hardware (e.g., a CUDA 12.8 nightly build, a CUDA 11.8 stable build, or a CPU-only build).
-        *   This step will **re-install or upgrade** the PyTorch components to ensure you have the best performing version for your system. This might look like PyTorch is being installed twice, but it's a necessary step to get the right build.
+        *   Installs a PyTorch build suited to your hardware.
+        *   Verifies that the selected build can actually import and run on the detected device.
+        *   Falls back when verification fails.
 
 **What this means for you:**
 
-*   **Users with NVIDIA GPUs:** The `install_torch.py` script will attempt to provide you with a CUDA-accelerated PyTorch. The `run.bat` script should handle this automatically.
+*   **Users with NVIDIA GPUs:** the installer will attempt to provide a CUDA-accelerated PyTorch automatically.
 *   **Users on CPU-only systems:** `install_torch.py` will install a CPU-only version of PyTorch.
-*   **Users with different CUDA versions than the primary developer:** `install_torch.py` will attempt to install the correct PyTorch for *your* detected CUDA version (e.g., if you have CUDA 11.8, it will target a PyTorch build for CUDA 11.8).
-*   **macOS (Apple Silicon/MPS) Users:** The `install_torch.py` script is currently CUDA-focused. For MPS acceleration, you will likely need to manually install a suitable PyTorch version (e.g., `uv pip install torch torchvision torchaudio` in the activated `.venv`) *after* `uv pip sync requirements.lock.txt` and *before* running `main.py`. The `ModelLoaderThread` in `main.py` includes logic to attempt to use the "mps" device if a compatible PyTorch is present.
+*   **Users with very new NVIDIA GPUs:** the installer may select a newer official CUDA wheel than the upstream `chatterbox-tts` package pins, because older wheels can lack kernels for the newer GPU architecture.
+*   **macOS / Linux users:** the Windows setup flow is currently the maintained path. Manual installation is safer than relying on `run.sh` for now.
 
-**Key takeaway:** The `requirements.lock.txt` provides a stable base for most packages. The `install_torch.py` script then tailors the PyTorch installation to your specific hardware for optimal performance. You generally do not need to modify `requirements.lock.txt` manually regarding PyTorch.
+**Key takeaway:** the main lock file keeps the app dependencies stable, while the installer handles the Torch runtime separately so it can match the user's hardware.
 
 </details>
 
 ## Contributing
 
-Please take a look at [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to help out.
-
-## Contributors ✨
-
-Thanks goes to these wonderful people:
-
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<table>
-  <tr>
-    <td align="center" style="border: 1px solid #ccc; padding: 10px;"><a href="https://github.com/AcTePuKc"><img src="https://avatars.githubusercontent.com/AcTePuKc?v=4" width="100px;" alt=""/><br /><sub><b>AcTePuKc</b></sub></a><br />🚀 Creator / Maintainer</td>
-    <td align="center" style="border: 1px solid #ccc; padding: 10px;"><a href="https://github.com/lowkeytea"><img src="https://avatars.githubusercontent.com/lowkeytea?v=4" width="100px;" alt=""/><br /><sub><b>lowkeytea</b></sub></a><br />💻 Code</td>
-  </tr>
-</table>
-<!-- ALL-CONTRIBUTORS-LIST:END -->
-
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification.
-Contributions of any kind are welcome!
+Please open an issue or pull request if you want to help improve the app, installer flow, or model compatibility support.
 
 ## Acknowledgements
 
 *   **Resemble AI** for the open-source [Chatterbox TTS model](https://github.com/resemble-ai/chatterbox).
 *   The developers of PySide6, NLTK, PyTorch, and `uv`.
+
+## Contributors ✨
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/lowkeytea"><img src="https://avatars.githubusercontent.com/u/185973220?v=4?s=100" width="100px;" alt="lowkeytea"/><br /><sub><b>lowkeytea</b></sub></a><br /><a href="https://github.com/actepukc/Chatterbox-TTS-UI/commits?author=lowkeytea" title="Code">💻</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind welcome!

@@ -1,0 +1,57 @@
+{
+  "models": [
+    {
+      "repo_id": "ResembleAI/chatterbox",
+      "label": "Official multilingual",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "Hello. This is a short test of the multilingual model.",
+      "test_texts": {
+        "en": "Hello. This is a short test of the multilingual model.",
+        "es": "Hola. Esta es una prueba corta del modelo multilingue.",
+        "hi": "नमस्ते। यह बहुभाषी मॉडल की एक छोटी जांच है।",
+        "pt": "Ola. Este e um teste curto do modelo multilingue.",
+        "zh": "你好。这是多语言模型的简短测试。"
+      },
+      "notes": "Recommended default model. Uses the official multilingual V3 T3 weights by default.",
+      "backend": "multilingual",
+      "language_id": "en",
+      "multilingual_t3_model": "v3"
+    },
+    {
+      "repo_id": "ResembleAI/chatterbox",
+      "label": "Legacy English compatibility",
+      "enabled": true,
+      "experimental": true,
+      "test_text": "Hello. This is a quick test of the legacy English Chatterbox loader.",
+      "notes": "Uses the older English-focused loader path for compatibility testing.",
+      "backend": "legacy",
+      "language_id": "en"
+    },
+    {
+      "repo_id": "your-hf-name/your-chatterbox-model",
+      "label": "Example custom Spanish multilingual entry",
+      "enabled": false,
+      "experimental": true,
+      "test_text": "Hola. Reemplaza este repo_id por un modelo compatible que quieras probar.",
+      "test_texts": {
+        "es": "Hola. Reemplaza este repo_id por un modelo compatible que quieras probar.",
+        "en": "Hello. Replace this repo_id with a compatible model you want to try."
+      },
+      "notes": "Example only. Change repo_id, set enabled=true, and keep backend=multilingual for a compatible multilingual repo.",
+      "backend": "multilingual",
+      "language_id": "es",
+      "multilingual_t3_model": "v3"
+    },
+    {
+      "repo_id": "your-hf-name/your-legacy-chatterbox-model",
+      "label": "Example custom legacy entry",
+      "enabled": false,
+      "experimental": true,
+      "test_text": "Hello. Replace this repo id with a legacy-compatible model you want to try.",
+      "notes": "Example only. Set enabled=true and replace repo_id with a compatible legacy repo.",
+      "backend": "legacy",
+      "language_id": "en"
+    }
+  ]
+}
