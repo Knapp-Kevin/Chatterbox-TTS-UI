@@ -9,8 +9,9 @@ Current recommended launcher flow:
 
 *   `run.bat`: launches the app once after running environment setup.
 *   `setup_env.bat`: prepares or repairs the local environment and writes installer logs.
+*   `run.sh` + `setup_env.sh`: best-effort shell launcher/setup flow for macOS/Linux, not yet validated to the same level as Windows.
 
-`run.sh` is currently **legacy / experimental** and does not match the Windows setup flow yet.
+Windows remains the primary maintained path.
 
 
 ## Table of Contents
@@ -175,9 +176,9 @@ Current recommended launcher flow:
 
 ### macOS / Linux
 
-*   `run.sh` is currently **legacy / experimental** and has not been updated to match the current Windows launcher flow.
-*   If you are on macOS or Linux, prefer a manual setup for now.
-*   Apple Silicon / MPS users should install a suitable PyTorch build manually after the base dependencies are installed.
+*   `run.sh` now mirrors the split launcher/setup pattern used on Windows through `setup_env.sh`, but it is still **best-effort / experimental**.
+*   If you are on macOS or Linux, manual setup is still the safest fallback.
+*   Apple Silicon / MPS users should install a suitable PyTorch build manually after the base dependencies are installed if the automatic Torch step is not appropriate for their machine.
 If you prefer not to use the `run.bat` script or are on a different OS:
 
 1.  Ensure **Python 3.11** (or compatible) and **`uv`** are installed and in your PATH.
@@ -213,7 +214,8 @@ If you prefer not to use the `run.bat` script or are on a different OS:
 *   `run.bat`: Windows launcher. Runs setup, then starts the app once.
 *   `launch_app.py`: Startup wrapper that logs pre-GUI crashes to `logs/app_startup_*.log`.
 *   `setup_env.bat`: Windows environment setup and repair script.
-*   `run.sh`: Legacy / experimental shell launcher.
+*   `run.sh`: Shell launcher. Runs `setup_env.sh`, then starts the app.
+*   `setup_env.sh`: Best-effort shell environment setup and repair script for macOS/Linux.
 *   `model_backends.py`: Backend-aware Chatterbox model loading adapter.
 *   `models.json`: Editable model list for official and custom repo entries.
 *   `requirements.in`: High-level list of direct Python dependencies.
@@ -235,9 +237,10 @@ If you prefer not to use the `run.bat` script or are on a different OS:
     python -m nltk.downloader punkt
     python -m nltk.downloader punkt_tab
     ```
-*   **First launch is slow / the app seems stuck:** This is expected on a clean setup. The environment, PyTorch runtime, and model files may still be downloading. Check the console and the newest file in `logs/`.
+*   **First launch is slow / the app seems stuck:** This is expected on a clean setup. The environment, PyTorch runtime, and model files may still be downloading. Check the Activity Log or the newest file in `logs/`.
 *   **The app started on CPU but you have an NVIDIA GPU:** Close the app and run `run.bat` again from a console so you can watch the installer output. If it still fails, attach the newest file from `logs/installer_*.log`.
 *   **The app still fails after a previous broken install:** Delete `.venv` and run `run.bat` again for a clean rebuild.
+*   **macOS / Linux shell launcher problems:** `run.sh` and `setup_env.sh` are still best-effort. If they fail on your machine, fall back to the manual install steps and share your platform details if you want to help validate the shell path.
 *   **`ChatterboxTTS library not found` / model backend import failed**: Ensure `setup_env.bat` completed successfully and inspect the newest installer log.
 *   **The app never opens a window / closes before UI appears:** Check the newest `logs/app_startup_*.log` file. This captures import-time and pre-window startup crashes that would otherwise be hidden by `pythonw.exe`.
 *   **No audio playback / Media Player Errors**: Make sure FFmpeg is correctly installed and its `bin` directory is in your system's PATH.
