@@ -126,8 +126,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QLabel, QTextEdit, QPushButton, QSlider, QSpinBox,
     QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QGroupBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QPlainTextEdit, QSplitter, QLineEdit,
-    QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget,
-    QScrollArea
+    QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget, QLayout
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
@@ -975,7 +974,7 @@ class ChatterboxApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Chatterbox TTS Interface")
-        self.setGeometry(100, 100, 1000, 820)
+        self.resize(1000, 820)
         self.model = None
         self.device_used = "cpu"
         self.current_model_repo = DEFAULT_MODEL_REPO
@@ -1030,7 +1029,9 @@ class ChatterboxApp(QMainWindow):
 
         self.log_message_signal.connect(self.append_console_log)
         self._init_ui()
+        self.fit_default_geometry()
         self.restore_window_settings()
+        self.update_minimum_size()
         self.attach_log_sink()
         self.update_output_log()
         if CHATTERBOX_AVAILABLE:
@@ -1071,20 +1072,9 @@ class ChatterboxApp(QMainWindow):
         title_label.setObjectName("PageTitle")
         subtitle_label = QLabel(subtitle)
         subtitle_label.setObjectName("PageSubtitle")
-        subtitle_label.setWordWrap(True)
         layout.addWidget(title_label)
         layout.addWidget(subtitle_label)
         return page, layout
-
-    @staticmethod
-    def _scrollable(page):
-        # Pages scroll rather than clip when the window is short.
-        scroll = QScrollArea()
-        scroll.setWidget(page)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return scroll
 
     @staticmethod
     def _accent(button):
@@ -1098,7 +1088,6 @@ class ChatterboxApp(QMainWindow):
         return button
 
     def _init_ui(self):
-        self.setMinimumSize(940, 660)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         root_layout = QHBoxLayout(main_widget)
@@ -1130,7 +1119,7 @@ class ChatterboxApp(QMainWindow):
 
         # ---------- Generate page ----------
         generate_page, generate_layout = self._make_page(
-            "Generate", "Write the text, pick a language and delivery, then generate.")
+            "Generate", "Write your text, choose the delivery, then generate.")
 
         voice_row = QHBoxLayout()
         voice_row.addWidget(QLabel("Voice"))
@@ -1214,10 +1203,9 @@ class ChatterboxApp(QMainWindow):
                     "the file name. [seed]")
         delivery_layout.addLayout(params_layout)
         delivery_hint = QLabel(
-            "Tip: punctuation steers delivery too. Commas and ellipses add pauses; "
-            "question marks lift the ending. Advanced options are under Model > Sampling.")
+            "Tip: commas and ellipses add pauses; question marks lift the ending.")
         delivery_hint.setObjectName("Muted")
-        delivery_hint.setWordWrap(True)
+        delivery_hint.setToolTip("Advanced sampling options are under Model > Sampling.")
         delivery_layout.addWidget(delivery_hint)
 
         finishing_header = QHBoxLayout()
@@ -1337,12 +1325,11 @@ class ChatterboxApp(QMainWindow):
         self.output_log_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         player_layout.addWidget(self.output_log_listwidget, 1)
         generate_layout.addWidget(player_card, 2)
-        self.pages.addWidget(self._scrollable(generate_page))
+        self.pages.addWidget(generate_page)
 
         # ---------- Voice page ----------
         voice_page, voice_layout = self._make_page(
-            "Voice", "Choose the voice to clone. Leave it on the default voice, "
-            "record yourself, or use an existing audio file.")
+            "Voice", "Use the default voice, record your own, or pick an audio file.")
 
         current_card, current_layout = self._make_card("Current voice")
         current_row = QHBoxLayout()
@@ -1363,10 +1350,8 @@ class ChatterboxApp(QMainWindow):
 
         record_card, record_layout = self._make_card("Record a new reference")
         record_hint = QLabel(
-            "Read a short passage (about 15 seconds) in a quiet room. "
-            "The first 6-10 seconds matter most, so start speaking right away.")
+            "Read about 15 seconds in a quiet room; the first few seconds matter most.")
         record_hint.setObjectName("Muted")
-        record_hint.setWordWrap(True)
         record_layout.addWidget(record_hint)
         record_row = QHBoxLayout()
         record_row.addWidget(QLabel("Microphone"))
@@ -1412,12 +1397,11 @@ class ChatterboxApp(QMainWindow):
         saved_actions.addWidget(browse_ref_button)
         saved_layout.addLayout(saved_actions)
         voice_layout.addWidget(saved_card, 1)
-        self.pages.addWidget(self._scrollable(voice_page))
+        self.pages.addWidget(voice_page)
 
         # ---------- Model page ----------
         model_page, model_layout = self._make_page(
-            "Model", "Choose which Chatterbox model to run. Models download once, "
-            "then load from the local cache.")
+            "Model", "Models download once, then load from the local cache.")
         model_card, model_card_layout = self._make_card("Active model")
         repo_layout = QHBoxLayout()
         self.model_repo_combo = QComboBox()
@@ -1440,8 +1424,9 @@ class ChatterboxApp(QMainWindow):
         )
         self.model_config_help_label.setWordWrap(True)
         self.model_config_help_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.model_config_help_label.setObjectName("Muted")
-        config_layout.addWidget(self.model_config_help_label)
+        config_hint = QLabel("Add or enable models in models.json, then click Reload Model List.")
+        config_hint.setObjectName("Muted")
+        config_layout.addWidget(config_hint)
         self.model_details_label = QLabel("")
         self.model_details_label.setWordWrap(True)
         self.model_details_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -1466,7 +1451,7 @@ class ChatterboxApp(QMainWindow):
         config_layout.addLayout(config_grid)
         model_layout.addWidget(config_card)
         model_layout.addStretch(1)
-        self.pages.addWidget(self._scrollable(model_page))
+        self.pages.addWidget(model_page)
 
         # ---------- Log page ----------
         log_page, log_layout = self._make_page(
@@ -1479,7 +1464,7 @@ class ChatterboxApp(QMainWindow):
         log_font.setStyleHint(QFont.StyleHint.Monospace)
         self.console_log_view.setFont(log_font)
         log_layout.addWidget(self.console_log_view, 1)
-        self.pages.addWidget(self._scrollable(log_page))
+        self.pages.addWidget(log_page)
 
         self.sidebar.setCurrentRow(self.PAGE_GENERATE)
 
@@ -1488,10 +1473,12 @@ class ChatterboxApp(QMainWindow):
         self.status_bar = QLabel("Status: Initializing...")
         self.status_bar.setWordWrap(False)
         self.status_bar.setTextFormat(Qt.TextFormat.PlainText)
+        # Status text is elided to fit; it must never set the window's minimum width.
         self.status_bar.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
+        self.status_bar.setMinimumWidth(120)
         self.status_bar.setFixedHeight(self.status_bar.sizeHint().height() + 4)
         qt_status_bar.addWidget(self.status_bar, 1)
         self.model_load_progress = QProgressBar()
@@ -1530,6 +1517,36 @@ class ChatterboxApp(QMainWindow):
         if isinstance(payload, dict):
             return payload
         return {}
+
+    def update_minimum_size(self):
+        """Keep the window at least as large as its content needs, so nothing
+        ever clips or scrolls; grow the window if the content just got bigger."""
+        if self.centralWidget() is None:
+            return
+        # Layout changes propagate upward one event-loop pass per level, so
+        # invalidate the whole chain to measure the current content right now.
+        for layout in self.findChildren(QLayout):
+            layout.invalidate()
+        self.layout().activate()
+        hint = self.minimumSizeHint()
+        self.setMinimumSize(hint)
+        if self.isMaximized() or self.isFullScreen():
+            return
+        if self.width() < hint.width() or self.height() < hint.height():
+            self.resize(max(self.width(), hint.width()), max(self.height(), hint.height()))
+
+    def fit_default_geometry(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        hint = self.minimumSizeHint()
+        width = max(hint.width(), min(self.width(), available.width() - 40))
+        height = max(hint.height(), min(self.height(), available.height() - 60))
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
 
     def restore_window_settings(self):
         geometry_b64 = self.app_settings.get("window_geometry")
@@ -1707,6 +1724,8 @@ class ChatterboxApp(QMainWindow):
         arrow = "\u25be" if expanded else "\u25b8"
         self.finishing_toggle.setText(f"{arrow} Finishing touches")
         self.finishing_summary_label.setVisible(not expanded)
+        if self.isVisible():
+            self.update_minimum_size()
 
     # --- Voice selection ---
 
