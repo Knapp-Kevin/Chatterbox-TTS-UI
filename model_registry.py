@@ -94,6 +94,31 @@ def key_weight_file(entry):
     return weights_file(entry)
 
 
+# What each model is for. The order is the order groups appear in the UI.
+CAPABILITIES = {
+    "clone": ("Voice cloning", "Speak in the voice of a reference clip from the Voice page."),
+    "preset": ("Preset voices", "Pick a built-in speaker and steer it with a style."),
+    "design": ("Voice design", "Describe a voice in words and the model creates it."),
+}
+QWEN_CAPABILITY = {"base": "clone", "custom_voice": "preset", "voice_design": "design"}
+
+
+def capability_for(entry):
+    if entry.get("backend") == "qwen3":
+        return QWEN_CAPABILITY.get(entry.get("qwen_variant"), "clone")
+    return "clone"  # Chatterbox clones, or uses its built-in voice with no clip
+
+
+def group_by_capability(entries):
+    """[(capability, title, [entries])] in CAPABILITIES order, skipping empty groups."""
+    groups = []
+    for capability, (title, _description) in CAPABILITIES.items():
+        members = [entry for entry in entries if capability_for(entry) == capability]
+        if members:
+            groups.append((capability, title, members))
+    return groups
+
+
 def engine_label(entry):
     engine = engine_for(entry)
     if engine.key == "qwen3":

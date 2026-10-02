@@ -2288,10 +2288,11 @@ class ChatterboxApp(QMainWindow):
         self.estimate_button.setVisible(True)
         self.text_stats_label.setText(
             f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters")
+        visible = self.get_visible_model_entries()
         for index in range(self.model_repo_combo.count()):
-            visible = self.get_visible_model_entries()
-            if index < len(visible):
-                item_rate, item_measured = self.seconds_per_char_for(visible[index])
+            position = self.model_repo_combo.itemData(index)
+            if isinstance(position, int) and position < len(visible):
+                item_rate, item_measured = self.seconds_per_char_for(visible[position])
                 self.model_repo_combo.setItemData(
                     index,
                     f"About {self.format_duration(len(text) * item_rate)} for the current text"
@@ -2306,7 +2307,19 @@ class ChatterboxApp(QMainWindow):
         header = menu.addAction(f"Time for this text ({len(text):,} characters), by model")
         header.setEnabled(False)
         menu.addSeparator()
-        for entry, seconds, measured, active in self.model_estimates(len(text)):
+        estimates = {self.entry_key(e) + (e["label"],): row
+                     for row in self.model_estimates(len(text)) for e in [row[0]]}
+        for _capability, title, members in model_registry.group_by_capability(self.get_visible_model_entries()):
+            menu.addSection(title)
+            rows = sorted((estimates[self.entry_key(e) + (e["label"],)] for e in members), key=lambda r: r[1])
+            for entry, seconds, measured, active in rows:
+                self._add_estimate_action(menu, entry, seconds, measured, active)
+        menu.addSeparator()
+        note = menu.addAction("Estimates become measurements once a model has generated a few sections.")
+        note.setEnabled(False)
+        menu.exec(self.estimate_button.mapToGlobal(self.estimate_button.rect().bottomLeft()))
+
+    def _add_estimate_action(self, menu, entry, seconds, measured, active):
             marker = "\u25cf " if active else "    "
             label = f"{marker}{entry['label']}  \u2014  about {self.format_duration(seconds)}"
             label += "" if measured else "  (estimate)"
@@ -2315,10 +2328,6 @@ class ChatterboxApp(QMainWindow):
             action = menu.addAction(label)
             action.setEnabled(not active and not self.is_generating and not getattr(self, "model_is_loading", False))
             action.triggered.connect(lambda _checked=False, e=entry: self.switch_to_entry(e))
-        menu.addSeparator()
-        note = menu.addAction("Estimates become measurements once a model has generated a few sections.")
-        note.setEnabled(False)
-        menu.exec(self.estimate_button.mapToGlobal(self.estimate_button.rect().bottomLeft()))
 
     def switch_to_entry(self, entry):
         index = self.model_repo_combo.findText(entry["label"])
@@ -2710,8 +2719,23 @@ class ChatterboxApp(QMainWindow):
         sizes = model_registry.cached_repo_sizes()
         self.models_list.blockSignals(True)
         self.models_list.clear()
-        select_row = 0
-        for row, entry in enumerate(self.model_entries):
+        select_row = None
+        first_entry_row = None
+        header_font = QFont(self.models_list.font())
+        header_font.setBold(True)
+        ordered = []
+        for capability, title, members in model_registry.group_by_capability(self.model_entries):
+            ordered.append((None, (title, model_registry.CAPABILITIES[capability][1])))
+            ordered.extend((self.model_entries.index(entry), entry) for entry in members)
+        for row, entry in ordered:
+            if row is None:
+                title, description = entry
+                header = QListWidgetItem(title.upper())
+                header.setFlags(Qt.ItemFlag.NoItemFlags)
+                header.setFont(header_font)
+                header.setToolTip(description)
+                self.models_list.addItem(header)
+                continue
             engine = model_registry.engine_for(entry)
             languages = engine.languages_summary
             engine_text = model_registry.engine_label(entry)
@@ -2723,7 +2747,7 @@ class ChatterboxApp(QMainWindow):
                 status = "not downloaded"
             active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
             hidden = "" if entry.get("enabled", True) else " \u00b7 hidden"
-            marker = "\u25cf " if active else "    "
+            marker = "  \u25cf " if active else "      "
             item = QListWidgetItem(f"{marker}{entry['label']}\n      {engine_text} \u00b7 {languages} \u00b7 {status}{hidden}")
             item.setData(Qt.ItemDataRole.UserRole, row)
             item.setToolTip(f"{entry['repo_id']}\n{engine_text} \u00b7 {languages} \u00b7 {status}"
@@ -2734,10 +2758,13 @@ class ChatterboxApp(QMainWindow):
                 font.setBold(True)
                 item.setFont(font)
             self.models_list.addItem(item)
+            list_row = self.models_list.count() - 1
+            if first_entry_row is None:
+                first_entry_row = list_row
             if previous is not None and self.entry_key(entry) == self.entry_key(previous) \
                     and entry.get("label") == previous.get("label"):
-                select_row = row
-        self.models_list.setCurrentRow(select_row)
+                select_row = list_row
+        self.models_list.setCurrentRow(select_row if select_row is not None else (first_entry_row or 0))
         self.models_list.blockSignals(False)
         self.update_model_details()
 
@@ -2972,29 +2999,39 @@ class ChatterboxApp(QMainWindow):
         visible_entries = self.get_visible_model_entries()
         self.model_repo_combo.blockSignals(True)
         self.model_repo_combo.clear()
-        for index, entry in enumerate(visible_entries):
-            self.model_repo_combo.addItem(entry["label"], index)
-            self.model_repo_combo.setItemData(
-                index, f"{entry['repo_id']} \u00b7 {model_registry.engine_for(entry).label}",
-                Qt.ItemDataRole.ToolTipRole)
+        header_font = QFont(self.model_repo_combo.font())
+        header_font.setBold(True)
+        for _capability, title, members in model_registry.group_by_capability(visible_entries):
+            self.model_repo_combo.addItem(title.upper(), None)
+            header = self.model_repo_combo.model().item(self.model_repo_combo.count() - 1)
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setFont(header_font)
+            for entry in members:
+                self.model_repo_combo.addItem(entry["label"], visible_entries.index(entry))
+                self.model_repo_combo.setItemData(
+                    self.model_repo_combo.count() - 1,
+                    f"{entry['repo_id']} \u00b7 {model_registry.engine_label(entry)}",
+                    Qt.ItemDataRole.ToolTipRole)
 
         selected_index = -1
         if selected_label:
             selected_index = self.model_repo_combo.findText(selected_label)
+            if selected_index >= 0 and self.model_repo_combo.itemData(selected_index) is None:
+                selected_index = -1
         if selected_index < 0:
             for index, entry in enumerate(visible_entries):
                 if self.entry_key(entry) == self.loaded_entry_key():
-                    selected_index = index
+                    selected_index = self.model_repo_combo.findData(index)
                     break
 
         if selected_index < 0:
             for index, entry in enumerate(visible_entries):
                 if entry["repo_id"] == DEFAULT_MODEL_REPO and entry.get("backend") == BACKEND_MULTILINGUAL:
-                    selected_index = index
+                    selected_index = self.model_repo_combo.findData(index)
                     break
 
         if selected_index < 0 and visible_entries:
-            selected_index = 0
+            selected_index = self.model_repo_combo.findData(0)
 
         if selected_index >= 0:
             self.model_repo_combo.setCurrentIndex(selected_index)
