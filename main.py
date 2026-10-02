@@ -138,6 +138,8 @@ import ui_theme
 import audio_effects
 import documents
 import model_registry
+import qwen_engine
+import gc
 import time
 from collections import deque
 import wave
@@ -192,6 +194,13 @@ resolve_multilingual_t3_model = getattr(
 )
 
 MAX_TEXT_INPUT_LENGTH = documents.MAX_SECTION_LENGTH
+QWEN_BACKEND = "qwen3"
+
+
+def languages_for_backend(backend):
+    if backend == QWEN_BACKEND:
+        return dict(qwen_engine.LANGUAGE_LABELS)
+    return get_supported_languages_for_backend(backend)
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
 REFERENCE_RECORDINGS_DIRNAME = "reference_recordings"
@@ -366,6 +375,7 @@ def load_models_config(config_path):
                 "backend": backend,
                 "language_id": str(item.get("language_id", "en")).strip().lower() or "en",
                 "multilingual_t3_model": multilingual_t3_model,
+                "qwen_variant": str(item.get("qwen_variant", "")).strip(),
                 "test_texts": normalized_test_texts,
             }
         )
@@ -452,12 +462,19 @@ class ModelLoaderThread(QThread):
                 f"Attempting to load Chatterbox model from repo '{self.repo_id}' "
                 f"using backend '{self.backend}' on device: {self.device}..."
             )
-            model_instance = load_chatterbox_model(
-                self.repo_id,
-                self.backend,
-                self.device,
-                multilingual_t3_model=self.multilingual_t3_model,
-            )
+            if self.backend == QWEN_BACKEND:
+                if not qwen_engine.is_installed():
+                    raise RuntimeError(
+                        "The Qwen engine isn't installed. Use Load this model on the Model page "
+                        "to install it.")
+                model_instance = qwen_engine.load_qwen_model(self.repo_id, log=print)
+            else:
+                model_instance = load_chatterbox_model(
+                    self.repo_id,
+                    self.backend,
+                    self.device,
+                    multilingual_t3_model=self.multilingual_t3_model,
+                )
             if model_instance is None:
                 raise RuntimeError("Model backend loader returned no model instance.")
             model_to = getattr(model_instance, "to", None)
@@ -998,6 +1015,16 @@ class ModelEntryDialog(QDialog):
         self.weights_label = QLabel("Weights")
         form.addRow(self.weights_label, self.weights_combo)
 
+        self.variant_combo = QComboBox()
+        for key, label in model_registry.QWEN_VARIANTS.items():
+            self.variant_combo.addItem(label, key)
+            self.variant_combo.setItemData(self.variant_combo.count() - 1,
+                                           qwen_engine.VARIANTS[key], Qt.ItemDataRole.ToolTipRole)
+        variant_index = self.variant_combo.findData(entry.get("qwen_variant"))
+        self.variant_combo.setCurrentIndex(max(0, variant_index))
+        self.variant_label = QLabel("Qwen variant")
+        form.addRow(self.variant_label, self.variant_combo)
+
         self.language_combo = QComboBox()
         self.language_combo.setToolTip("Language selected by default when this model is loaded.")
         form.addRow("Default language", self.language_combo)
@@ -1034,9 +1061,11 @@ class ModelEntryDialog(QDialog):
         engine = model_registry.ENGINES[self.engine_combo.currentData()]
         self.weights_combo.setVisible(engine.uses_weights_version)
         self.weights_label.setVisible(engine.uses_weights_version)
+        self.variant_combo.setVisible(engine.key == QWEN_BACKEND)
+        self.variant_label.setVisible(engine.key == QWEN_BACKEND)
         current = self.language_combo.currentData() or self._preferred_language
         self.language_combo.clear()
-        for language_id, name in get_supported_languages_for_backend(engine.key).items():
+        for language_id, name in languages_for_backend(engine.key).items():
             self.language_combo.addItem(f"{name} [{language_id}]", language_id)
         index = self.language_combo.findData(current)
         self.language_combo.setCurrentIndex(index if index >= 0 else max(0, self.language_combo.findData("en")))
@@ -1053,6 +1082,8 @@ class ModelEntryDialog(QDialog):
         self.adjustSize()
         if result.ok:
             self.engine_combo.setCurrentIndex(self.engine_combo.findData(result.detected_backend))
+            if result.qwen_variant:
+                self.variant_combo.setCurrentIndex(self.variant_combo.findData(result.qwen_variant))
             if result.weight_versions and self.weights_combo.currentData() not in result.weight_versions:
                 self.weights_combo.setCurrentIndex(self.weights_combo.findData(result.weight_versions[0]))
             if not self.name_input.text().strip():
@@ -1072,6 +1103,7 @@ class ModelEntryDialog(QDialog):
             "enabled": self.enabled_checkbox.isChecked(),
             "experimental": entry.get("experimental", False),
             "multilingual_t3_model": self.weights_combo.currentData() if engine == "multilingual" else "",
+            "qwen_variant": self.variant_combo.currentData() if engine == QWEN_BACKEND else "",
             "test_texts": entry.get("test_texts", {}),
         })
         return entry
@@ -1091,6 +1123,17 @@ class ModelEntryDialog(QDialog):
             self.adjustSize()
             return
         self.accept()
+
+
+class QwenInstallThread(QThread):
+    finished_with = Signal(str)
+
+    def run(self):
+        try:
+            qwen_engine.install(log=print)
+            self.finished_with.emit("")
+        except Exception as exc:
+            self.finished_with.emit(str(exc))
 
 
 # --- ChatterboxApp ---
@@ -1356,7 +1399,44 @@ class ChatterboxApp(QMainWindow):
         text_card_layout.addLayout(generate_actions_layout)
         generate_layout.addWidget(text_card, 3)
 
+        # Qwen controls share Delivery's first row with the Chatterbox-only sliders,
+        # so switching engines never changes the window's minimum height.
+        self.qwen_row = QWidget()
+        qwen_row_layout = QHBoxLayout(self.qwen_row)
+        qwen_row_layout.setContentsMargins(0, 0, 0, 0)
+        qwen_row_layout.setSpacing(10)
+        qwen_settings = self.app_settings.get("qwen", {})
+        self.qwen_speaker_combo = QComboBox()
+        self.qwen_speaker_combo.setToolTip("Built-in Qwen speaker.")
+        self.qwen_speaker_combo.currentIndexChanged.connect(lambda _i: self.refresh_voice_chip())
+        self.qwen_speaker_label = QLabel("Speaker")
+        qwen_row_layout.addWidget(self.qwen_speaker_label)
+        qwen_row_layout.addWidget(self.qwen_speaker_combo)
+        self.qwen_instruct_input = QLineEdit()
+        self.qwen_instruct_label = QLabel("Style")
+        qwen_row_layout.addWidget(self.qwen_instruct_label)
+        qwen_row_layout.addWidget(self.qwen_instruct_input, 1)
+        self.qwen_transcript_label = QLabel("Clip transcript")
+        self.qwen_transcript_input = QLineEdit()
+        self.qwen_transcript_input.setPlaceholderText(
+            "What is said in the reference clip (optional, improves likeness)")
+        self.qwen_transcript_input.setToolTip(
+            "With a transcript Qwen clones more closely. Recordings made with Record... fill this "
+            "in with the passage you read; edit it if you said something different.")
+        self.qwen_transcript_input.editingFinished.connect(self.save_reference_transcript)
+        qwen_row_layout.addWidget(self.qwen_transcript_label)
+        qwen_row_layout.addWidget(self.qwen_transcript_input, 1)
+        self.qwen_watermark_checkbox = QCheckBox("Add AI watermark")
+        self.qwen_watermark_checkbox.setChecked(bool(qwen_settings.get("watermark", True)))
+        self.qwen_watermark_checkbox.setToolTip(
+            "Qwen doesn't watermark its audio. When ticked, the same inaudible Perth watermark "
+            "Chatterbox uses is added, so output from every engine is marked the same way.")
+        self.qwen_settings = qwen_settings
+        self.qwen_row.setVisible(False)
+        self.qwen_watermark_checkbox.setVisible(False)
+
         delivery_card, delivery_layout = self._make_card("Delivery")
+        delivery_layout.addWidget(self.qwen_row)
         params_layout = QGridLayout()
         params_layout.setHorizontalSpacing(14)
         params_layout.setVerticalSpacing(8)
@@ -1369,13 +1449,14 @@ class ChatterboxApp(QMainWindow):
             widget.setToolTip(tooltip)
             params_layout.addWidget(label, row, column)
             params_layout.addWidget(widget, row, column + 1)
+            return label
 
         self.exaggeration_slider = self._create_slider(0.25, 2.0, 0.05, 0.5)
-        add_control(0, 0, "Expressiveness", self.exaggeration_slider,
+        self.exaggeration_label = add_control(0, 0, "Expressiveness", self.exaggeration_slider,
                     "How animated and emotional the delivery sounds. 0.5 is neutral; "
                     "higher is more dramatic (and often a bit faster). [exaggeration]")
         self.cfg_slider = self._create_slider(0.2, 1.0, 0.05, 0.5)
-        add_control(0, 2, "Pacing", self.cfg_slider,
+        self.cfg_label = add_control(0, 2, "Pacing", self.cfg_slider,
                     "Lower gives slower, more deliberate speech; higher is brisker and "
                     "follows the reference voice's style more closely. Try 0.3 for "
                     "expressive or fast-talking voices. [cfg_weight]")
@@ -1395,6 +1476,7 @@ class ChatterboxApp(QMainWindow):
                     "Leave on 'New take each time' for a fresh result on every run. Enter a "
                     "number to reproduce the same take exactly; the number used is shown in "
                     "the file name. [seed]")
+        params_layout.addWidget(self.qwen_watermark_checkbox, 2, 2, 1, 2)
         delivery_layout.addLayout(params_layout)
         delivery_hint = QLabel(
             "Tip: commas and ellipses add pauses; question marks lift the ending.")
@@ -1922,6 +2004,10 @@ class ChatterboxApp(QMainWindow):
         if not text:
             QMessageBox.warning(self, "Input Error", "Please enter some text to synthesize.")
             return
+        qwen_problem = self.prepare_qwen_generation()
+        if qwen_problem:
+            QMessageBox.information(self, "Qwen Voice", qwen_problem)
+            return
 
         self.is_generating = True
         self.generation_is_preview = preview
@@ -2057,6 +2143,109 @@ class ChatterboxApp(QMainWindow):
             self.set_reference_audio(file_path)
             self.last_reference_audio_dir = os.path.dirname(file_path)
 
+    # --- Engine-specific controls ---
+
+    def active_qwen_model(self):
+        return self.model if isinstance(self.model, qwen_engine.QwenModel) else None
+
+    def update_engine_controls(self):
+        qwen = self.active_qwen_model()
+        self.qwen_row.setVisible(qwen is not None)
+        self.qwen_watermark_checkbox.setVisible(qwen is not None)
+        for widget in (self.exaggeration_label, self.exaggeration_slider, self.cfg_label, self.cfg_slider):
+            widget.setVisible(qwen is None)
+        if qwen is not None:
+            mode = qwen.mode
+            self.qwen_speaker_combo.blockSignals(True)
+            self.qwen_speaker_combo.clear()
+            for speaker in qwen.speakers:
+                self.qwen_speaker_combo.addItem(speaker.replace("_", " ").title(), speaker)
+            saved = self.qwen_speaker_combo.findData(self.qwen_settings.get("speaker"))
+            self.qwen_speaker_combo.setCurrentIndex(max(0, saved))
+            self.qwen_speaker_combo.blockSignals(False)
+            if mode == "voice_design":
+                self.qwen_instruct_label.setText("Voice description")
+                self.qwen_instruct_input.setPlaceholderText(
+                    "e.g. a calm, low male voice with a slight rasp, unhurried and warm")
+                self.qwen_instruct_input.setText(self.qwen_settings.get("description", ""))
+            else:
+                self.qwen_instruct_label.setText("Style")
+                self.qwen_instruct_input.setPlaceholderText(
+                    "Optional, e.g. excited and upbeat, or whisper softly")
+                self.qwen_instruct_input.setText(self.qwen_settings.get("style", ""))
+            for widget in (self.qwen_speaker_label, self.qwen_speaker_combo):
+                widget.setVisible(mode == "custom_voice")
+            for widget in (self.qwen_instruct_label, self.qwen_instruct_input):
+                widget.setVisible(mode in ("custom_voice", "voice_design"))
+            for widget in (self.qwen_transcript_label, self.qwen_transcript_input):
+                widget.setVisible(mode == "base")
+        self.refresh_voice_chip()
+        if self.isVisible():
+            self.update_minimum_size()
+
+    def refresh_voice_chip(self):
+        qwen = self.active_qwen_model()
+        reference = self.ref_audio_path_label.toolTip()
+        if qwen is not None and qwen.mode == "custom_voice":
+            text = f"Preset: {self.qwen_speaker_combo.currentText() or 'speaker'}"
+            tip = "A built-in Qwen speaker. Reference clips aren't used by this model."
+        elif qwen is not None and qwen.mode == "voice_design":
+            text, tip = "Designed voice", "Described in the Delivery card below."
+        elif reference:
+            text, tip = os.path.basename(reference), reference
+        else:
+            text = "Default voice"
+            tip = "The model's built-in voice. Pick a reference clip on the Voice page to clone a voice."
+            if qwen is not None:
+                text, tip = "No clip selected", "Qwen voice cloning needs a reference clip from the Voice page."
+        self.voice_chip.setText(text)
+        self.voice_chip.setToolTip(tip)
+
+    def prepare_qwen_generation(self):
+        """Copy the Qwen card into the model; returns an error message or None."""
+        qwen = self.active_qwen_model()
+        if qwen is None:
+            return None
+        instruct = self.qwen_instruct_input.text().strip()
+        if qwen.mode == "voice_design" and not instruct:
+            return "Describe the voice you want (Voice description, in the Delivery card) first."
+        if qwen.mode == "base" and not self.ref_audio_path_label.toolTip():
+            return "Choose a reference clip on the Voice page; Qwen cloning needs one."
+        qwen.speaker = self.qwen_speaker_combo.currentData() or qwen.speaker
+        qwen.instruct = instruct
+        qwen.ref_text = self.qwen_transcript_input.text().strip() if qwen.mode == "base" else ""
+        qwen.watermark = self.qwen_watermark_checkbox.isChecked()
+        key = "description" if qwen.mode == "voice_design" else "style"
+        self.qwen_settings.update({key: instruct, "speaker": qwen.speaker, "watermark": qwen.watermark})
+        self.app_settings["qwen"] = self.qwen_settings
+        return None
+
+    @staticmethod
+    def transcript_path(audio_path):
+        return os.path.splitext(audio_path)[0] + ".txt"
+
+    def load_reference_transcript(self, audio_path):
+        text = ""
+        if audio_path and os.path.exists(self.transcript_path(audio_path)):
+            with open(self.transcript_path(audio_path), encoding="utf-8") as handle:
+                text = handle.read().strip()
+        self.qwen_transcript_input.setText(text)
+
+    def save_reference_transcript(self):
+        audio_path = self.ref_audio_path_label.toolTip()
+        if not audio_path:
+            return
+        text = self.qwen_transcript_input.text().strip()
+        path = self.transcript_path(audio_path)
+        try:
+            if text:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(text + "\n")
+            elif os.path.exists(path):
+                os.remove(path)
+        except OSError as exc:
+            print(f"Could not save transcript for {os.path.basename(audio_path)}: {exc}")
+
     # --- Finishing touches ---
 
     def current_finishing_settings(self):
@@ -2105,6 +2294,9 @@ class ChatterboxApp(QMainWindow):
             self.voice_chip.setToolTip("The model's built-in voice. Pick a reference clip on the Voice page to clone a voice.")
         self.preview_reference_button.setEnabled(bool(path))
         self.clear_reference_button.setEnabled(bool(path))
+        if hasattr(self, "qwen_transcript_input"):
+            self.load_reference_transcript(path)
+            self.refresh_voice_chip()
 
     def clear_reference_audio(self):
         self.stop_reference_preview()
@@ -2225,6 +2417,7 @@ class ChatterboxApp(QMainWindow):
             return
         self.recording_format = dialog.audio_format
         self.recording_buffer = dialog.recorded_bytes
+        self.recording_script = dialog.script_label.text()
         self._save_recording()
         self.recording_buffer = bytearray()
 
@@ -2249,6 +2442,10 @@ class ChatterboxApp(QMainWindow):
             wav_file.setsampwidth(2)
             wav_file.setframerate(audio_format.sampleRate())
             wav_file.writeframes(pcm16.tobytes())
+        script = getattr(self, "recording_script", "")
+        if script:
+            with open(self.transcript_path(output_path), "w", encoding="utf-8") as handle:
+                handle.write(script + "\n")
         self.set_reference_audio(output_path)
         self.refresh_recordings_list()
         self.last_reference_audio_dir = self.recordings_directory
@@ -2292,18 +2489,21 @@ class ChatterboxApp(QMainWindow):
         select_row = 0
         for row, entry in enumerate(self.model_entries):
             engine = model_registry.engine_for(entry)
-            languages = (engine.languages_summary if entry.get("backend") == BACKEND_MULTILINGUAL
-                         else "English")
-            if model_registry.is_downloaded(entry):
+            languages = (engine.languages_summary
+                         if entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND) else "English")
+            engine_text = model_registry.engine_label(entry)
+            if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
+                status = "engine not installed"
+            elif model_registry.is_downloaded(entry):
                 status = f"downloaded ({model_registry.format_size(sizes.get(entry['repo_id'], 0))} repo cache)"
             else:
                 status = "not downloaded"
             active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
             hidden = "" if entry.get("enabled", True) else " \u00b7 hidden"
             marker = "\u25cf " if active else "    "
-            item = QListWidgetItem(f"{marker}{entry['label']}\n      {engine.label} \u00b7 {languages} \u00b7 {status}{hidden}")
+            item = QListWidgetItem(f"{marker}{entry['label']}\n      {engine_text} \u00b7 {languages} \u00b7 {status}{hidden}")
             item.setData(Qt.ItemDataRole.UserRole, row)
-            item.setToolTip(f"{entry['repo_id']}\n{engine.label} \u00b7 {languages} \u00b7 {status}"
+            item.setToolTip(f"{entry['repo_id']}\n{engine_text} \u00b7 {languages} \u00b7 {status}"
                             + ("\nHidden from the model switcher" if hidden else ""))
             entry["_status"] = status
             if active:
@@ -2340,7 +2540,7 @@ class ChatterboxApp(QMainWindow):
         self.model_name_label.setText(entry["label"])
         active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
         self.model_active_chip.setVisible(active)
-        engine_text = engine.label
+        engine_text = model_registry.engine_label(entry)
         if engine.uses_weights_version:
             engine_text += f" \u00b7 weights {model_registry.weights_file(entry).split('_')[-1].split('.')[0].upper()}"
         self.model_engine_label.setText(engine_text)
@@ -2354,7 +2554,9 @@ class ChatterboxApp(QMainWindow):
         self.model_status_label.setToolTip(status)
         busy = getattr(self, "model_is_loading", False) or self.is_generating
         self.load_model_button.setEnabled(not busy and not active)
-        self.load_model_button.setText("Loaded" if active else "Load this model")
+        needs_install = entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed()
+        self.load_model_button.setText(
+            "Loaded" if active else "Install Qwen engine..." if needs_install else "Load this model")
         is_default = repo == DEFAULT_MODEL_REPO and entry.get("backend") == BACKEND_MULTILINGUAL \
             and sum(1 for e in self.model_entries if self.entry_key(e) == self.entry_key(entry)) == 1
         self.remove_model_button.setEnabled(not is_default and not active)
@@ -2426,11 +2628,39 @@ class ChatterboxApp(QMainWindow):
         entry = self.selected_list_entry()
         if entry is None:
             return
+        if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
+            self.install_qwen_engine()
+            return
         index = self.model_repo_combo.findText(entry["label"])
         if index >= 0 and index != self.model_repo_combo.currentIndex():
             self.model_repo_combo.setCurrentIndex(index)  # loads via the switcher
         elif self.entry_key(entry) != self.loaded_entry_key() or self.model is None:
             self.load_model(entry)
+
+    def install_qwen_engine(self):
+        answer = QMessageBox.question(
+            self, "Install Qwen Engine",
+            "Qwen3-TTS runs in its own Python environment (engines/qwen) because it needs "
+            "different library versions than Chatterbox.\n\nInstalling downloads about 3 GB of "
+            "PyTorch and Qwen packages (less if PyTorch is already cached). Model weights "
+            "download the first time each Qwen model is loaded.\n\nInstall now?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.set_status_message("Status: Installing the Qwen engine. Progress is on the Log page.")
+        self.load_model_button.setEnabled(False)
+        self.qwen_install_thread = QwenInstallThread()
+        self.qwen_install_thread.finished_with.connect(self.on_qwen_install_finished)
+        self.qwen_install_thread.start()
+
+    def on_qwen_install_finished(self, error):
+        if error:
+            self.set_status_message("Status: Qwen engine install failed. See the Log page.")
+            QMessageBox.warning(self, "Qwen Engine", f"The install failed:\n{error}")
+        else:
+            self.set_status_message("Status: Qwen engine installed. Loading the model...")
+            self.refresh_models_page()
+            self.load_selected_list_model()
+        self.update_model_details()
 
     def save_hf_token(self):
         token = self.hf_token_input.text().strip()
@@ -2556,7 +2786,7 @@ class ChatterboxApp(QMainWindow):
 
     def refresh_language_options(self):
         selected_entry = self.get_selected_model_entry()
-        supported_languages = get_supported_languages_for_backend(
+        supported_languages = languages_for_backend(
             selected_entry.get("backend", BACKEND_MULTILINGUAL)
         )
         preferred_language = selected_entry.get("language_id", "en")
@@ -2574,7 +2804,7 @@ class ChatterboxApp(QMainWindow):
         if preferred_index >= 0:
             self.language_combo.setCurrentIndex(preferred_index)
 
-        is_multilingual = selected_entry.get("backend") == BACKEND_MULTILINGUAL
+        is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND)
         self.language_combo.setEnabled(is_multilingual)
         self.language_combo.setToolTip(
             "Language used by the multilingual Chatterbox backend."
@@ -2616,6 +2846,18 @@ class ChatterboxApp(QMainWindow):
         else:
             self.refresh_language_options()
 
+    def release_model(self):
+        """Free the current model (and stop a Qwen worker) before loading another."""
+        old_model, self.model = self.model, None
+        if isinstance(old_model, qwen_engine.QwenModel):
+            old_model.close()
+        del old_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if hasattr(self, "qwen_row"):
+            self.update_engine_controls()
+
     def load_model(self, selected_entry=None):
         if not CHATTERBOX_AVAILABLE:
             QMessageBox.critical(
@@ -2639,6 +2881,7 @@ class ChatterboxApp(QMainWindow):
         )
         self.generate_button.setEnabled(False)
         self.preview_button.setEnabled(False)
+        self.release_model()
         self.set_model_loading_state(True)
         self.model_loader_thread = ModelLoaderThread(
             selected_repo,
@@ -2666,6 +2909,7 @@ class ChatterboxApp(QMainWindow):
         self.set_model_loading_state(False)
         self.update_text_stats()
         self.refresh_models_page()
+        self.update_engine_controls()
         if self.system_has_nvidia_gpu and self.device_used == "cpu":
             details = self.cuda_runtime_issue or (
                 "This Python environment is using a CPU-only PyTorch build."
@@ -2978,6 +3222,8 @@ class ChatterboxApp(QMainWindow):
         if hasattr(self, 'audio_generator_thread') and self.audio_generator_thread.isRunning():
             self.audio_generator_thread.stop()  # Request stop
             self.audio_generator_thread.wait()  # Wait for it to finish
+        if isinstance(self.model, qwen_engine.QwenModel):
+            self.model.close()
         event.accept()
 
 

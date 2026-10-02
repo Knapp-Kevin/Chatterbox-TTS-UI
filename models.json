@@ -52,6 +52,39 @@
       "notes": "Example only. Set enabled=true and replace repo_id with a compatible legacy repo.",
       "backend": "legacy",
       "language_id": "en"
+    },
+    {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "label": "Qwen3 preset voices",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "Hello. This is a short test of a Qwen preset voice.",
+      "notes": "Built-in speakers you can steer with plain-language style instructions.",
+      "backend": "qwen3",
+      "qwen_variant": "custom_voice",
+      "language_id": "en"
+    },
+    {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "label": "Qwen3 voice design",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "Hello. This voice was designed from a written description.",
+      "notes": "Creates a new voice from a written description.",
+      "backend": "qwen3",
+      "qwen_variant": "voice_design",
+      "language_id": "en"
+    },
+    {
+      "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "label": "Qwen3 voice cloning",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "Hello. This is a short test of Qwen voice cloning.",
+      "notes": "Clones the reference clip from the Voice page; a transcript of the clip improves likeness.",
+      "backend": "qwen3",
+      "qwen_variant": "base",
+      "language_id": "en"
     }
   ]
 }

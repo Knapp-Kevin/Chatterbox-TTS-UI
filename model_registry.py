@@ -10,13 +10,13 @@ import json
 import os
 import re
 
-from huggingface_hub import HfApi, scan_cache_dir, try_to_load_from_cache
+from huggingface_hub import HfApi, hf_hub_download, scan_cache_dir, try_to_load_from_cache
 from huggingface_hub.errors import (
     GatedRepoError, HfHubHTTPError, RepositoryNotFoundError)
 
 ENTRY_KEYS = (
     "repo_id", "label", "enabled", "experimental", "test_text", "test_texts",
-    "notes", "backend", "language_id", "multilingual_t3_model",
+    "notes", "backend", "language_id", "multilingual_t3_model", "qwen_variant",
 )
 
 
@@ -43,6 +43,19 @@ ENGINES = {
         description="The original English-only Chatterbox layout.",
         languages_summary="English",
     ),
+    "qwen3": Engine(
+        key="qwen3",
+        label="Qwen3-TTS",
+        description="10 languages; preset voices with style instructions, voice design from a "
+                    "description, or cloning. Runs in its own environment (Apache-2.0).",
+        languages_summary="10 languages",
+    ),
+}
+
+QWEN_VARIANTS = {
+    "custom_voice": "Preset voices",
+    "voice_design": "Voice design",
+    "base": "Voice cloning",
 }
 
 WEIGHT_VERSIONS = {
@@ -75,13 +88,24 @@ def key_weight_file(entry):
     """The large file whose presence means the entry's model is downloaded."""
     if entry.get("backend") == "legacy":
         return "t3_cfg.safetensors"
+    if entry.get("backend") == "qwen3":
+        return "model.safetensors"
     return weights_file(entry)
+
+
+def engine_label(entry):
+    engine = engine_for(entry)
+    if engine.key == "qwen3":
+        return f"{engine.label} · {QWEN_VARIANTS.get(entry.get('qwen_variant'), 'unknown variant')}"
+    return engine.label
 
 
 def entry_to_json(entry):
     payload = {key: entry[key] for key in ENTRY_KEYS if key in entry}
     if payload.get("backend") != "multilingual":
         payload.pop("multilingual_t3_model", None)
+    if payload.get("backend") != "qwen3":
+        payload.pop("qwen_variant", None)
     elif payload.get("multilingual_t3_model", "").endswith(".safetensors"):
         for short, filename in WEIGHT_VERSIONS.items():
             if payload["multilingual_t3_model"] == filename:
@@ -143,6 +167,7 @@ class RepoCheck:
     download_bytes: int = 0
     gated: bool = False
     private: bool = False
+    qwen_variant: str = ""
 
 
 def check_repo(repo_id, token=None):
@@ -172,6 +197,8 @@ def check_repo(repo_id, token=None):
         files = ENGINE_FILES["multilingual"] + ([WEIGHT_VERSIONS[best]] if best else ["t3_23lang.safetensors"])
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
+    elif "config.json" in sizes and "model.safetensors" in sizes:
+        return _check_qwen_repo(repo_id, token, sizes, gated, private)
     else:
         weights = sorted(name for name in sizes
                          if name.endswith((".safetensors", ".pt", ".bin", ".gguf", ".onnx")))
@@ -187,6 +214,23 @@ def check_repo(repo_id, token=None):
         detail += f", weights {', '.join(v.upper() for v in versions)}"
     detail += f" · about {format_size(download)} to download · {access}"
     return RepoCheck(True, detail, backend, versions, download, gated, private)
+
+
+def _check_qwen_repo(repo_id, token, sizes, gated, private):
+    try:
+        with open(hf_hub_download(repo_id, "config.json", token=token or None), encoding="utf-8") as handle:
+            config = json.load(handle)
+    except Exception as exc:
+        return RepoCheck(False, f"Could not read config.json: {exc}", gated=gated, private=private)
+    variant = config.get("tts_model_type", "")
+    if config.get("model_type") != "qwen3_tts" or variant not in QWEN_VARIANTS:
+        return RepoCheck(False, "This repo has a config.json but is not a Qwen3-TTS speech model "
+                                "this app can load.", gated=gated, private=private)
+    download = sum(sizes.values())
+    access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
+    return RepoCheck(True, f"Found: Qwen3-TTS, {QWEN_VARIANTS[variant].lower()} "
+                           f"· about {format_size(download)} to download · {access}",
+                     "qwen3", (), download, gated, private, variant)
 
 
 def whoami(token):
