@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -75,6 +76,20 @@ def detect_nvidia_cuda_version():
         if first_line:
             return _version_to_tag(first_line), "nvidia-smi"
     except (FileNotFoundError, subprocess.CalledProcessError, StopIteration):
+        pass
+
+    # Newer drivers reject the cuda_version query field and label the header
+    # "CUDA UMD Version" instead of "CUDA Version"; parse the plain header.
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        match = re.search(r"CUDA (?:UMD )?Version:\s*([0-9]+\.[0-9]+)", output)
+        if match:
+            return _version_to_tag(match.group(1)), "nvidia-smi header"
+    except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 
     try:
