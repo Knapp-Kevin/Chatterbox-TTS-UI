@@ -595,10 +595,14 @@ class AudioGeneratorThread(QThread):
             else:
                 self.set_seed_internal(self.input_seed)
 
-            print("Using NLTK for sentence tokenization/combining...")
-            final_chunks = documents.split_into_sections(self.original_text)
+            max_chars = getattr(self.model, "max_section_chars", MAX_TEXT_INPUT_LENGTH)
+            planned = documents.plan_sections(self.original_text, max_chars)
             if self.preview:
-                final_chunks = final_chunks[:PREVIEW_MAX_SECTIONS]
+                planned = planned[:PREVIEW_MAX_SECTIONS]
+            final_chunks = [section.text for section in planned]
+            self.section_boundaries = [section.boundary for section in planned]
+            print(f"Split into {len(planned)} sections (up to {max_chars} characters, "
+                  "never across paragraphs).")
 
             if not final_chunks:
                 self.error_occurred.emit(
@@ -613,6 +617,9 @@ class AudioGeneratorThread(QThread):
             sr = self.model.sr
             # Engines that support it (Qwen) generate several sections per call.
             batch_size = max(1, int(getattr(self.model, "batch_size", 1)))
+            batches = documents.plan_batches(
+                [len(text) for text in final_chunks], batch_size,
+                getattr(self.model, "batch_char_budget", None))
             generate_kwargs = dict(
                 audio_prompt_path=self.audio_prompt_path if self.audio_prompt_path else None,
                 exaggeration=self.exaggeration,
@@ -623,8 +630,7 @@ class AudioGeneratorThread(QThread):
                 min_p=self.min_p,
                 top_p=self.top_p,
             )
-            i = 0
-            while i < total_chunks:
+            for i, batch_end in batches:
                 if self._is_stopped:
                     if all_audio_tensors and not self.preview:
                         # Keep the finished sections of a long render.
@@ -634,7 +640,7 @@ class AudioGeneratorThread(QThread):
                     self.error_occurred.emit(
                         f"Generation stopped by user at chunk {i+1}/{total_chunks}.")
                     return
-                batch = final_chunks[i:i + batch_size]
+                batch = final_chunks[i:batch_end]
                 current_chunk_num = i + 1
                 last = i + len(batch)
                 self.chunk_generated.emit(current_chunk_num, last, total_chunks)
@@ -653,7 +659,6 @@ class AudioGeneratorThread(QThread):
                 # A batch takes as long as its longest section, so time is measured against that.
                 self.section_timed.emit(max(len(text) for text in batch) if len(batch) > 1 else len(batch[0]),
                                         len(batch), time.monotonic() - section_started)
-                i = last
 
             if self._is_stopped and self.partial_info is None and len(all_audio_tensors) < total_chunks:
                 self.error_occurred.emit("Stopped before final concat.")
@@ -665,7 +670,8 @@ class AudioGeneratorThread(QThread):
             print("\nConcatenating audio chunks...")
             finishing = self.finishing
             sections = [chunk.reshape(-1).float().numpy() for chunk in all_audio_tensors]
-            final_audio = audio_effects.join_sections(sections, sr, finishing.section_pause)
+            final_audio = audio_effects.join_sections(
+                sections, sr, self.section_boundaries[:len(sections)], finishing.paragraph_pause)
             print(f"Applying finishing touches: {finishing.summary()}")
             final_audio = audio_effects.apply_finishing(final_audio, sr, finishing)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1702,10 +1708,10 @@ class ChatterboxApp(QMainWindow):
             finishing_grid.addWidget(widget, row, column + 1)
 
         self.pause_slider = self._create_slider(
-            *audio_effects.PAUSE_RANGE, 0.1, 0.0, "{:.1f} s")
-        add_finishing(0, 0, "Section pause", self.pause_slider,
-                      f"Long text is generated in sections of about {MAX_TEXT_INPUT_LENGTH} "
-                      "characters. This adds a pause where the sections are joined.")
+            *audio_effects.PAUSE_RANGE, 0.1, 0.6, "{:.1f} s")
+        add_finishing(0, 0, "Paragraph pause", self.pause_slider,
+                      "Silence between paragraphs (headings get a little more). Pauses between "
+                      "sentences and inside long sentences are kept short and even automatically.")
         self.output_format_combo = QComboBox()
         self.output_format_combo.addItems(LOSSLESS_FORMATS)
         add_finishing(0, 2, "Save as", self.output_format_combo,
@@ -2238,7 +2244,9 @@ class ChatterboxApp(QMainWindow):
         selected = self.text_input.textCursor().selectedText().replace("\u2029", "\n").strip()
         if selected:
             return selected
-        sections = documents.split_into_sections(self.text_input.toPlainText())
+        entry = self.loaded_entry() or self.get_selected_model_entry()
+        sections = documents.split_into_sections(
+            self.text_input.toPlainText(), self.max_section_chars_for(entry))
         return sections[0] if sections else ""
 
     def start_generation(self, preview=False):
@@ -2259,10 +2267,10 @@ class ChatterboxApp(QMainWindow):
         self.is_generating = True
         self.generation_is_preview = preview
         self.generation_char_count = len(text)
-        lengths = self.section_lengths(text)
+        plan_entry = self.loaded_entry() or self.get_selected_model_entry()
+        lengths = self.section_lengths(text, plan_entry)
         if preview:
             lengths = lengths[:PREVIEW_MAX_SECTIONS]
-        plan_entry = self.loaded_entry() or self.get_selected_model_entry()
         self.generation_plan = self.batch_plan(plan_entry, lengths)
         self.generation_estimate = sum(cost for _f, _l, cost in self.generation_plan)
         self.progress_range = None
@@ -2380,9 +2388,10 @@ class ChatterboxApp(QMainWindow):
         """[(first, last, estimated seconds)] for generating sections of these lengths."""
         rate, _measured = self.seconds_per_char_for(entry)
         size = self.batch_size_for(entry)
+        budget = qwen_engine.BATCH_CHAR_BUDGET if size > 1 else None
         plan = []
-        for start in range(0, len(lengths), size):
-            batch = lengths[start:start + size]
+        for start, end in documents.plan_batches(lengths, size, budget):
+            batch = lengths[start:end]
             if size > 1:
                 cost = max(batch) * (1 + BATCH_COST_SLOPE * len(batch)) * rate
             else:
@@ -2395,15 +2404,25 @@ class ChatterboxApp(QMainWindow):
         return sum(cost for _first, _last, cost in self.batch_plan(entry, lengths)), measured
 
     @staticmethod
-    def section_lengths(text):
-        return [len(section) for section in documents.split_into_sections(text)]
+    def max_section_chars_for(entry):
+        if entry.get("backend") == QWEN_BACKEND:
+            return qwen_engine.MAX_SECTION_CHARS
+        return MAX_TEXT_INPUT_LENGTH
 
-    def model_estimates(self, lengths):
+    def section_lengths(self, text, entry):
+        return [len(section) for section in
+                documents.split_into_sections(text, self.max_section_chars_for(entry))]
+
+    def model_estimates(self, text):
         """[(entry, seconds, measured, active)] for every model in the switcher, fastest first."""
         rows = []
         active_key = self.loaded_entry_key() if self.model is not None else None
+        lengths_by_size = {}
         for entry in self.get_visible_model_entries():
-            seconds, measured = self.estimate_seconds(entry, lengths)
+            size = self.max_section_chars_for(entry)
+            if size not in lengths_by_size:
+                lengths_by_size[size] = self.section_lengths(text, entry)
+            seconds, measured = self.estimate_seconds(entry, lengths_by_size[size])
             rows.append((entry, seconds, measured, self.entry_key(entry) == active_key))
         return sorted(rows, key=lambda row: row[1])
 
@@ -2415,9 +2434,9 @@ class ChatterboxApp(QMainWindow):
             self.estimate_button.setVisible(False)
             self.text_stats_label.setText("Type or paste text, or open a document.")
             return
-        lengths = self.section_lengths(text)
-        sections = len(lengths)
         entry = self.loaded_entry() or self.get_selected_model_entry()
+        lengths = self.section_lengths(text, entry)
+        sections = len(lengths)
         seconds, measured = self.estimate_seconds(entry, lengths)
         self.estimate_button.setText(f"About {self.format_duration(seconds)} \u25be")
         self.estimate_button.setVisible(True)
@@ -2427,7 +2446,8 @@ class ChatterboxApp(QMainWindow):
         for index in range(self.model_repo_combo.count()):
             position = self.model_repo_combo.itemData(index)
             if isinstance(position, int) and position < len(visible):
-                item_seconds, item_measured = self.estimate_seconds(visible[position], lengths)
+                item_seconds, item_measured = self.estimate_seconds(
+                    visible[position], self.section_lengths(text, visible[position]))
                 self.model_repo_combo.setItemData(
                     index,
                     f"About {self.format_duration(item_seconds)} for the current text"
@@ -2443,7 +2463,7 @@ class ChatterboxApp(QMainWindow):
         header.setEnabled(False)
         menu.addSeparator()
         estimates = {self.entry_key(e) + (e["label"],): row
-                     for row in self.model_estimates(self.section_lengths(text)) for e in [row[0]]}
+                     for row in self.model_estimates(text) for e in [row[0]]}
         for _capability, title, members in model_registry.group_by_capability(self.get_visible_model_entries()):
             menu.addSection(title)
             rows = sorted((estimates[self.entry_key(e) + (e["label"],)] for e in members), key=lambda r: r[1])
@@ -2623,7 +2643,7 @@ class ChatterboxApp(QMainWindow):
         return audio_effects.FinishingSettings(
             speed=round(self.speed_slider.get_value(), 2),
             pitch_semitones=round(self.pitch_slider.get_value(), 1),
-            section_pause=round(self.pause_slider.get_value(), 1),
+            paragraph_pause=round(self.pause_slider.get_value(), 1),
             even_volume=self.even_volume_checkbox.isChecked(),
             trim_silence=self.trim_silence_checkbox.isChecked(),
             output_format="MP3" if self.mp3_checkbox.isChecked() else self.output_format_combo.currentText(),
@@ -2632,7 +2652,7 @@ class ChatterboxApp(QMainWindow):
     def apply_finishing_settings(self, settings):
         self.speed_slider.set_value(settings.speed)
         self.pitch_slider.set_value(settings.pitch_semitones)
-        self.pause_slider.set_value(settings.section_pause)
+        self.pause_slider.set_value(settings.paragraph_pause)
         self.even_volume_checkbox.setChecked(settings.even_volume)
         self.trim_silence_checkbox.setChecked(settings.trim_silence)
         self.mp3_checkbox.setChecked(settings.output_format == "MP3")
@@ -2643,7 +2663,7 @@ class ChatterboxApp(QMainWindow):
     def reset_finishing(self):
         """Finishing touches only; Advanced effects are left as they are."""
         defaults = audio_effects.FinishingSettings()
-        self.pause_slider.set_value(defaults.section_pause)
+        self.pause_slider.set_value(defaults.paragraph_pause)
         self.even_volume_checkbox.setChecked(defaults.even_volume)
         self.trim_silence_checkbox.setChecked(defaults.trim_silence)
         self.output_format_combo.setCurrentText(defaults.output_format)

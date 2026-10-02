@@ -22,7 +22,13 @@ AUDIO_EXTENSIONS = tuple("." + ext for ext, _fmt, _sub in OUTPUT_FORMATS.values(
 
 SPEED_RANGE = (0.75, 1.25)
 PITCH_RANGE = (-4.0, 4.0)  # semitones
-PAUSE_RANGE = (0.0, 1.5)   # seconds between generated sections
+PAUSE_RANGE = (0.0, 2.0)   # seconds of pause at paragraph breaks
+# Gaps at seams inside a paragraph (seconds). Each section's own leading and
+# trailing silence is trimmed first, so every seam of a kind sounds the same.
+CLAUSE_GAP = 0.12
+SENTENCE_GAP = 0.3
+HEADING_GAP_FACTOR = 1.5
+SEAM_PADDING_SECONDS = 0.04
 TARGET_RMS_DBFS = -20.0
 PEAK_CEILING_DBFS = -1.0
 TRIM_TOP_DB = 40.0
@@ -33,7 +39,7 @@ TRIM_PADDING_SECONDS = 0.08
 class FinishingSettings:
     speed: float = 1.0
     pitch_semitones: float = 0.0
-    section_pause: float = 0.0
+    paragraph_pause: float = 0.6
     even_volume: bool = True
     trim_silence: bool = True
     output_format: str = "WAV"
@@ -47,7 +53,7 @@ class FinishingSettings:
                     setattr(settings, key, type(getattr(settings, key))(value))
         settings.speed = float(np.clip(settings.speed, *SPEED_RANGE))
         settings.pitch_semitones = float(np.clip(settings.pitch_semitones, *PITCH_RANGE))
-        settings.section_pause = float(np.clip(settings.section_pause, *PAUSE_RANGE))
+        settings.paragraph_pause = float(np.clip(settings.paragraph_pause, *PAUSE_RANGE))
         if settings.output_format not in OUTPUT_FORMATS:
             settings.output_format = "WAV"
         return settings
@@ -61,8 +67,7 @@ class FinishingSettings:
             parts.append(f"speed {self.speed:.2f}x")
         if abs(self.pitch_semitones) > 1e-6:
             parts.append(f"pitch {self.pitch_semitones:+g} st")
-        if self.section_pause > 0:
-            parts.append(f"{self.section_pause:.1f}s pauses")
+        parts.append(f"{self.paragraph_pause:.1f}s paragraph pauses")
         if self.even_volume:
             parts.append("even volume")
         if self.trim_silence:
@@ -158,14 +163,40 @@ def _even_volume(wav):
     return (wav * gain).astype(np.float32)
 
 
-def join_sections(sections, sr, pause_seconds):
-    """Concatenate mono float sections with optional silence between them."""
-    gap = np.zeros(int(round(pause_seconds * sr)), dtype=np.float32)
+def seam_gap(boundary, paragraph_pause):
+    """Seconds of silence after a section, by the kind of seam that follows it."""
+    if boundary == "clause":
+        return CLAUSE_GAP
+    if boundary == "sentence":
+        return SENTENCE_GAP
+    if boundary == "paragraph":
+        return paragraph_pause
+    if boundary == "heading":
+        return max(paragraph_pause * HEADING_GAP_FACTOR, 0.6)
+    return 0.0
+
+
+def _trim_edges(wav, sr):
+    """Remove a section's leading/trailing silence, keeping a short natural tail."""
+    import librosa
+    if wav.size == 0 or float(np.max(np.abs(wav))) < 1e-4:
+        return wav
+    _trimmed, (start, end) = librosa.effects.trim(wav, top_db=TRIM_TOP_DB)
+    pad = int(SEAM_PADDING_SECONDS * sr)
+    return wav[max(0, start - pad):min(len(wav), end + pad)]
+
+
+def join_sections(sections, sr, boundaries, paragraph_pause):
+    """Concatenate mono sections with seam-appropriate silence between them:
+    short within sentences and between sentences, longer at paragraphs and
+    headings. boundaries[i] is the seam after sections[i]."""
     joined = []
     for index, section in enumerate(sections):
-        if index and gap.size:
-            joined.append(gap)
-        joined.append(np.asarray(section, dtype=np.float32).reshape(-1))
+        wav = _trim_edges(np.asarray(section, dtype=np.float32).reshape(-1), sr)
+        joined.append(wav)
+        if index < len(sections) - 1:
+            gap = seam_gap(boundaries[index] if index < len(boundaries) else "sentence", paragraph_pause)
+            joined.append(np.zeros(int(round(gap * sr)), dtype=np.float32))
     return np.concatenate(joined) if joined else np.zeros(0, dtype=np.float32)
 
 

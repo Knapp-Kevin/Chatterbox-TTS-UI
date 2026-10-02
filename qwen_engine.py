@@ -27,6 +27,14 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 # one batch, with peak VRAM rising only ~0.2 GB per extra section. The worker halves a batch
 # and retries if the GPU runs out of memory.
 BATCH_SIZE = 16
+# Qwen reads long text well, so sections can be whole paragraphs: fewer seams, and
+# intonation flows through each paragraph (Chatterbox stays at 280). Beyond ~600
+# characters, delivery length starts to vary noticeably between runs.
+MAX_SECTION_CHARS = 600
+# GPU memory grows with sections x section length (~1.2 GB per 1,000 characters on
+# the 1.7B model), so batches are also capped by characters: about 8 paragraph-length
+# sections or 16 short ones, peaking around 10 GB.
+BATCH_CHAR_BUDGET = 5000
 
 VARIANTS = {
     "custom_voice": "Preset voices with style instructions",
@@ -141,6 +149,8 @@ class QwenModel:
         # Sections generated per worker call. Decoding one sequence leaves the GPU mostly
         # idle (per-step overhead dominates), so batches are several times faster.
         self.batch_size = BATCH_SIZE if self.device == "cuda" else 1
+        self.max_section_chars = MAX_SECTION_CHARS
+        self.batch_char_budget = BATCH_CHAR_BUDGET
         # Set by the UI before each generation.
         self.speaker = speakers[0] if speakers else None
         self.instruct = ""
