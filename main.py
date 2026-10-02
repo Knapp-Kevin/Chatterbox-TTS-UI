@@ -142,6 +142,7 @@ import model_registry
 import qwen_engine
 import kokoro_engine
 import voxcpm_engine
+import omnivoice_engine
 import model_tiles
 import math
 import gc
@@ -203,9 +204,15 @@ LOSSLESS_FORMATS = ["WAV", "FLAC"]
 QWEN_BACKEND = "qwen3"
 KOKORO_BACKEND = "kokoro"
 VOXCPM_BACKEND = "voxcpm"
+OMNIVOICE_BACKEND = "omnivoice"
 # Engines that run in their own environment (engines/<name>), installed on first use.
-ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine, VOXCPM_BACKEND: voxcpm_engine}
-WORKER_MODEL_TYPES = (qwen_engine.QwenModel, kokoro_engine.KokoroModel, voxcpm_engine.VoxCPMModel)
+ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine, VOXCPM_BACKEND: voxcpm_engine,
+                  OMNIVOICE_BACKEND: omnivoice_engine}
+WORKER_MODEL_TYPES = (qwen_engine.QwenModel, kokoro_engine.KokoroModel, voxcpm_engine.VoxCPMModel,
+                      omnivoice_engine.OmniVoiceModel)
+# One model that both clones and designs; its entries switch mode without reloading.
+DUAL_MODE_BACKENDS = {VOXCPM_BACKEND, OMNIVOICE_BACKEND}
+DUAL_MODE_TYPES = (voxcpm_engine.VoxCPMModel, omnivoice_engine.OmniVoiceModel)
 ENGINE_INSTALL_NOTES = {
     QWEN_BACKEND: ("Qwen", "Qwen3-TTS runs in its own Python environment (engines/qwen) because it "
                            "needs different library versions than Chatterbox.\n\nInstalling downloads "
@@ -221,6 +228,13 @@ ENGINE_INSTALL_NOTES = {
                                "PyTorch (about 3 GB, or nothing if another engine already cached it) "
                                "plus about 1.5 GB of VoxCPM packages. The model itself is about 5 GB, "
                                "shared by the voice cloning and voice design entries."),
+    OMNIVOICE_BACKEND: ("OmniVoice", "OmniVoice runs in its own Python environment (engines/omnivoice) "
+                                     "because it needs packages Chatterbox doesn't use.\n\nInstalling "
+                                     "downloads PyTorch (about 3 GB, or nothing if another engine already "
+                                     "cached it) plus OmniVoice's packages. The model itself is about "
+                                     "3 GB, shared by the voice cloning and voice design entries.\n\n"
+                                     "Note: OmniVoice's weights are licensed CC BY-NC 4.0, for "
+                                     "non-commercial use only."),
 }
 
 
@@ -231,6 +245,8 @@ def languages_for_backend(backend):
         return dict(kokoro_engine.LANGUAGE_LABELS)
     if backend == VOXCPM_BACKEND:
         return dict(voxcpm_engine.LANGUAGE_LABELS)
+    if backend == OMNIVOICE_BACKEND:
+        return dict(omnivoice_engine.LANGUAGE_LABELS)
     return get_supported_languages_for_backend(backend)
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
@@ -252,6 +268,8 @@ DEFAULT_SECONDS_PER_CHAR = {
     ("kokoro", "cuda"): 0.002, ("kokoro", "cpu"): 0.02,
     # VoxCPM2: ~0.06-0.09 s/char on an RTX 5070 Ti (about real time).
     ("voxcpm", "cuda"): 0.07, ("voxcpm", "cpu"): 1.5,
+    # OmniVoice batches: ~0.0035 s/char across a batch of 8 on an RTX 5070 Ti.
+    ("omnivoice", "cuda"): 0.012, ("omnivoice", "cpu"): 0.5,
 }
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
@@ -385,7 +403,7 @@ def load_models_config(config_path):
             repo_id,
             backend,
             label,
-            multilingual_t3_model or str(item.get("voxcpm_mode", "")),
+            multilingual_t3_model or str(item.get("mode") or item.get("voxcpm_mode") or ""),
         )
         if not repo_id or model_key in seen_model_keys:
             continue
@@ -402,8 +420,8 @@ def load_models_config(config_path):
             optional["license"] = str(item["license"]).strip().lower()
         if isinstance(item.get("download_bytes"), int) and item["download_bytes"] > 0:
             optional["download_bytes"] = item["download_bytes"]
-        if backend == "voxcpm":
-            optional["voxcpm_mode"] = "design" if item.get("voxcpm_mode") == "design" else "clone"
+        if backend in DUAL_MODE_BACKENDS:
+            optional["mode"] = model_registry.entry_mode(item)
         normalized_models.append(
             {
                 **optional,
@@ -487,7 +505,7 @@ class ModelLoaderThread(QThread):
         self.repo_id = repo_id
         self.backend = backend
         self.multilingual_t3_model = multilingual_t3_model
-        self.voxcpm_mode = "clone"
+        self.mode = "clone"
 
     def run(self):
         try:
@@ -513,7 +531,9 @@ class ModelLoaderThread(QThread):
             elif self.backend == KOKORO_BACKEND:
                 model_instance = kokoro_engine.load_kokoro_model(self.repo_id, log=print)
             elif self.backend == VOXCPM_BACKEND:
-                model_instance = voxcpm_engine.load_voxcpm_model(self.repo_id, self.voxcpm_mode, log=print)
+                model_instance = voxcpm_engine.load_voxcpm_model(self.repo_id, self.mode, log=print)
+            elif self.backend == OMNIVOICE_BACKEND:
+                model_instance = omnivoice_engine.load_omnivoice_model(self.repo_id, self.mode, log=print)
             else:
                 model_instance = load_chatterbox_model(
                     self.repo_id,
@@ -1034,7 +1054,7 @@ class FindModelsDialog(QDialog):
     """Search Hugging Face for repos this app can load and pick one to add."""
 
     ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"),
-                      ("Kokoro", "kokoro"), ("VoxCPM", "voxcpm"))
+                      ("Kokoro", "kokoro"), ("VoxCPM", "voxcpm"), ("OmniVoice", "omnivoice"))
 
     def __init__(self, token, existing_repos, parent=None):
         super().__init__(parent)
@@ -1220,10 +1240,10 @@ class ModelEntryDialog(QDialog):
         form.addRow(self.variant_label, self.variant_combo)
 
         self.mode_combo = QComboBox()
-        for key, label in model_registry.VOXCPM_MODES.items():
+        for key, label in model_registry.VOICE_MODES.items():
             self.mode_combo.addItem(label, key)
-        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(entry.get("voxcpm_mode"))))
-        self.mode_combo.setToolTip("VoxCPM2 does both; add one entry for each to switch between them.")
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(model_registry.entry_mode(entry))))
+        self.mode_combo.setToolTip("This model does both; add one entry for each to switch between them.")
         self.mode_label = QLabel("Use for")
         form.addRow(self.mode_label, self.mode_combo)
 
@@ -1275,8 +1295,8 @@ class ModelEntryDialog(QDialog):
         self.weights_label.setVisible(engine.uses_weights_version)
         self.variant_combo.setVisible(engine.key == QWEN_BACKEND)
         self.variant_label.setVisible(engine.key == QWEN_BACKEND)
-        self.mode_combo.setVisible(engine.key == VOXCPM_BACKEND)
-        self.mode_label.setVisible(engine.key == VOXCPM_BACKEND)
+        self.mode_combo.setVisible(engine.key in DUAL_MODE_BACKENDS)
+        self.mode_label.setVisible(engine.key in DUAL_MODE_BACKENDS)
         current = self.language_combo.currentData() or self._preferred_language
         self.language_combo.clear()
         for language_id, name in languages_for_backend(engine.key).items():
@@ -1321,7 +1341,7 @@ class ModelEntryDialog(QDialog):
             "experimental": entry.get("experimental", False),
             "multilingual_t3_model": self.weights_combo.currentData() if engine == "multilingual" else "",
             "qwen_variant": self.variant_combo.currentData() if engine == QWEN_BACKEND else "",
-            "voxcpm_mode": self.mode_combo.currentData() if engine == VOXCPM_BACKEND else "",
+            "mode": self.mode_combo.currentData() if engine in DUAL_MODE_BACKENDS else "",
             "test_texts": entry.get("test_texts", {}),
         })
         if self.repo_input.text().strip() == self.original.get("repo_id") or self.checked:
@@ -1666,6 +1686,24 @@ class ChatterboxApp(QMainWindow):
         self.qwen_instruct_label = QLabel("Style")
         qwen_row_layout.addWidget(self.qwen_instruct_label)
         qwen_row_layout.addWidget(self.qwen_instruct_input, 1)
+        self.design_attributes_button = self._link(QPushButton("Attributes\u2026"))
+        self.design_attributes_button.setToolTip("Pick the voice's gender, age, pitch, accent and more.")
+        attributes_menu = QMenu(self)
+        # Keep Python references: PySide can otherwise free submenus made by addMenu(title).
+        self.design_attribute_menus = [attributes_menu]
+        for group, items in omnivoice_engine.DESIGN_ATTRIBUTES.items():
+            submenu = QMenu(group, attributes_menu)
+            attributes_menu.addMenu(submenu)
+            self.design_attribute_menus.append(submenu)
+            for item in items:
+                action = submenu.addAction(item)
+                action.triggered.connect(lambda _checked=False, item=item: self.qwen_instruct_input.setText(
+                    omnivoice_engine.set_attribute(self.qwen_instruct_input.text(), item)))
+        attributes_menu.addSeparator()
+        attributes_menu.addAction("Clear").triggered.connect(lambda: self.qwen_instruct_input.clear())
+        self.design_attributes_button.setMenu(attributes_menu)
+        self.design_attributes_button.setVisible(False)
+        qwen_row_layout.addWidget(self.design_attributes_button)
         self.qwen_transcript_label = QLabel("Clip transcript")
         self.qwen_transcript_input = QLineEdit()
         self.qwen_transcript_input.setPlaceholderText(
@@ -1685,6 +1723,7 @@ class ChatterboxApp(QMainWindow):
         self.qwen_settings = qwen_settings
         self.kokoro_settings = self.app_settings.get("kokoro", {})
         self.voxcpm_settings = self.app_settings.get("voxcpm", {})
+        self.omnivoice_settings = self.app_settings.get("omnivoice", {})
         self.qwen_row.setVisible(False)
         self.qwen_watermark_checkbox.setVisible(False)
 
@@ -2405,8 +2444,8 @@ class ChatterboxApp(QMainWindow):
 
     def speed_key(self, entry):
         variant = entry.get("qwen_variant") or entry.get("multilingual_t3_model") or ""
-        if entry.get("backend") == QWEN_BACKEND and self.speed_device() == "cuda":
-            variant += f"|batch{qwen_engine.BATCH_SIZE}"
+        if self.batch_size_for(entry) > 1:
+            variant += f"|batch{self.batch_size_for(entry)}"
         return f"{self.speed_device()}|{entry.get('repo_id')}|{entry.get('backend')}|{variant}"
 
     def seconds_per_char_for(self, entry):
@@ -2426,15 +2465,16 @@ class ChatterboxApp(QMainWindow):
         return next((e for e in self.model_entries if self.entry_key(e) == self.loaded_entry_key()), None)
 
     def batch_size_for(self, entry):
-        if entry.get("backend") == QWEN_BACKEND and self.speed_device() == "cuda":
-            return qwen_engine.BATCH_SIZE
+        module = ENGINE_MODULES.get(entry.get("backend"))
+        if module is not None and hasattr(module, "BATCH_SIZE") and self.speed_device() == "cuda":
+            return module.BATCH_SIZE
         return 1
 
     def batch_plan(self, entry, lengths):
         """[(first, last, estimated seconds)] for generating sections of these lengths."""
         rate, _measured = self.seconds_per_char_for(entry)
         size = self.batch_size_for(entry)
-        budget = qwen_engine.BATCH_CHAR_BUDGET if size > 1 else None
+        budget = ENGINE_MODULES[entry["backend"]].BATCH_CHAR_BUDGET if size > 1 else None
         plan = []
         for start, end in documents.plan_batches(lengths, size, budget):
             batch = lengths[start:end]
@@ -2591,6 +2631,8 @@ class ChatterboxApp(QMainWindow):
             return self.kokoro_settings
         if isinstance(model, voxcpm_engine.VoxCPMModel):
             return self.voxcpm_settings
+        if isinstance(model, omnivoice_engine.OmniVoiceModel):
+            return self.omnivoice_settings
         return self.qwen_settings
 
     def fill_speaker_combo(self, model):
@@ -2632,7 +2674,12 @@ class ChatterboxApp(QMainWindow):
             self.qwen_watermark_checkbox.setChecked(bool(self.engine_settings(qwen).get("watermark", True)))
             settings = self.engine_settings(qwen)
             voxcpm = isinstance(qwen, voxcpm_engine.VoxCPMModel)
-            if mode == "voice_design":
+            omnivoice = isinstance(qwen, omnivoice_engine.OmniVoiceModel)
+            if mode == "voice_design" and omnivoice:
+                self.qwen_instruct_label.setText("Voice attributes")
+                self.qwen_instruct_input.setPlaceholderText("e.g. female, young adult, low pitch, british accent")
+                self.qwen_instruct_input.setText(settings.get("description", ""))
+            elif mode == "voice_design":
                 self.qwen_instruct_label.setText("Voice description")
                 self.qwen_instruct_input.setPlaceholderText(
                     "e.g. a calm, low male voice with a slight rasp, unhurried and warm")
@@ -2650,6 +2697,12 @@ class ChatterboxApp(QMainWindow):
                 widget.setVisible(mode in ("custom_voice", "voice_design") or (voxcpm and mode == "base"))
             for widget in (self.qwen_transcript_label, self.qwen_transcript_input):
                 widget.setVisible(mode == "base")
+            self.design_attributes_button.setVisible(omnivoice and mode == "voice_design")
+            self.qwen_transcript_input.setPlaceholderText(
+                "What is said in the reference clip (required by OmniVoice)" if omnivoice else
+                "What is said in the reference clip (optional, improves likeness)")
+        else:
+            self.design_attributes_button.setVisible(False)
         self.refresh_voice_chip()
         if self.isVisible():
             self.update_minimum_size()
@@ -2683,6 +2736,14 @@ class ChatterboxApp(QMainWindow):
             return "Describe the voice you want (Voice description, in the Delivery card) first."
         if qwen.mode == "base" and not self.ref_audio_path_label.toolTip():
             return "Choose a reference clip on the Voice page; this cloning model needs one."
+        if isinstance(qwen, omnivoice_engine.OmniVoiceModel):
+            if qwen.mode == "base" and not self.qwen_transcript_input.text().strip():
+                return ("OmniVoice needs the Clip transcript: type exactly what is said in the "
+                        "reference clip. Recordings made with Record\u2026 fill it in for you.")
+            if qwen.mode == "voice_design":
+                problem = omnivoice_engine.check_description(instruct)
+                if problem:
+                    return problem
         qwen.speaker = self.qwen_speaker_combo.currentData() or qwen.speaker
         qwen.watermark = self.qwen_watermark_checkbox.isChecked()
         if isinstance(qwen, kokoro_engine.KokoroModel):
@@ -2698,8 +2759,8 @@ class ChatterboxApp(QMainWindow):
         key = "description" if qwen.mode == "voice_design" else "style"
         settings = self.engine_settings(qwen)
         settings.update({key: instruct, "watermark": qwen.watermark})
-        if isinstance(qwen, voxcpm_engine.VoxCPMModel):
-            self.app_settings["voxcpm"] = settings
+        if isinstance(qwen, DUAL_MODE_TYPES):
+            self.app_settings[qwen.backend] = settings
         else:
             settings["speaker"] = qwen.speaker
             self.app_settings["qwen"] = settings
@@ -2988,15 +3049,15 @@ class ChatterboxApp(QMainWindow):
 
     @staticmethod
     def entry_key(entry):
-        if entry.get("backend") == VOXCPM_BACKEND:
-            return (entry.get("repo_id"), VOXCPM_BACKEND, entry.get("voxcpm_mode") or "clone")
+        if entry.get("backend") in DUAL_MODE_BACKENDS:
+            return (entry.get("repo_id"), entry.get("backend"), model_registry.entry_mode(entry))
         return (entry.get("repo_id"), entry.get("backend"), entry.get("multilingual_t3_model") or "")
 
     def loaded_entry_key(self):
         backend = self.current_model_backend
         weights = self.current_multilingual_t3_model if backend == BACKEND_MULTILINGUAL else ""
-        if backend == VOXCPM_BACKEND:
-            weights = getattr(self, "current_voxcpm_mode", "clone")
+        if backend in DUAL_MODE_BACKENDS:
+            weights = getattr(self, "current_mode", "clone")
         return (self.current_model_repo, backend, weights or "")
 
     def refresh_models_page(self, select_entry=None):
@@ -3238,8 +3299,8 @@ class ChatterboxApp(QMainWindow):
 
     def add_from_discover(self, result):
         seed = {"repo_id": result.repo_id}
-        if result.backend == VOXCPM_BACKEND:
-            seed["voxcpm_mode"] = "design" if self.current_capability() == "design" else "clone"
+        if result.backend in DUAL_MODE_BACKENDS:
+            seed["mode"] = "design" if self.current_capability() == "design" else "clone"
         if result.license:
             seed["license"] = result.license
         new_entry = self._edit_entry_dialog(seed)
@@ -3496,7 +3557,7 @@ class ChatterboxApp(QMainWindow):
             self.language_combo.setCurrentIndex(preferred_index)
 
         is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND, KOKORO_BACKEND,
-                                                            VOXCPM_BACKEND)
+                                                            *DUAL_MODE_BACKENDS)
         self.language_combo.setEnabled(is_multilingual)
         self.language_combo.setToolTip(
             "Language used by the multilingual Chatterbox backend."
@@ -3560,9 +3621,9 @@ class ChatterboxApp(QMainWindow):
         selected_entry = selected_entry or self.get_selected_model_entry()
         selected_repo = selected_entry["repo_id"]
         selected_backend = selected_entry.get("backend", BACKEND_MULTILINGUAL)
-        if (selected_backend == VOXCPM_BACKEND and isinstance(self.model, voxcpm_engine.VoxCPMModel)
-                and self.model.repo_id == selected_repo):
-            self.switch_voxcpm_mode(selected_entry)
+        if (selected_backend in DUAL_MODE_BACKENDS and isinstance(self.model, DUAL_MODE_TYPES)
+                and self.model.backend == selected_backend and self.model.repo_id == selected_repo):
+            self.switch_voice_mode(selected_entry)
             return
         selected_multilingual_t3_model = selected_entry.get(
             "multilingual_t3_model",
@@ -3579,23 +3640,23 @@ class ChatterboxApp(QMainWindow):
         self.preview_button.setEnabled(False)
         self.release_model()
         self.set_model_loading_state(True)
-        self.current_voxcpm_mode = selected_entry.get("voxcpm_mode") or "clone"
+        self.current_mode = model_registry.entry_mode(selected_entry)
         self.model_loader_thread = ModelLoaderThread(
             selected_repo,
             selected_backend,
             selected_multilingual_t3_model,
         )
-        self.model_loader_thread.voxcpm_mode = self.current_voxcpm_mode
+        self.model_loader_thread.mode = self.current_mode
         self.cuda_runtime_issue = self.model_loader_thread.cuda_probe_error
         self.model_loader_thread.model_loaded.connect(self.on_model_loaded)
         self.model_loader_thread.error_occurred.connect(
             self.on_model_load_error)
         self.model_loader_thread.start()
 
-    def switch_voxcpm_mode(self, entry):
-        """Switch the loaded VoxCPM model between cloning and design without reloading."""
-        self.current_voxcpm_mode = entry.get("voxcpm_mode") or "clone"
-        self.model.set_mode(self.current_voxcpm_mode)
+    def switch_voice_mode(self, entry):
+        """Switch a loaded dual-mode model between cloning and design without reloading."""
+        self.current_mode = model_registry.entry_mode(entry)
+        self.model.set_mode(self.current_mode)
         self.set_status_message(f"Status: Switched to {entry['label']} (same model, no reload). Ready.")
         self.update_engine_controls()
         self.refresh_language_options()

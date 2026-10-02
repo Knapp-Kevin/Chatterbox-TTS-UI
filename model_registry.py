@@ -17,7 +17,7 @@ from huggingface_hub.errors import (
 ENTRY_KEYS = (
     "repo_id", "label", "enabled", "experimental", "test_text", "test_texts",
     "notes", "backend", "language_id", "multilingual_t3_model", "qwen_variant",
-    "license", "download_bytes", "voxcpm_mode",
+    "license", "download_bytes", "mode",
 )
 
 # ---------- licenses ----------
@@ -32,6 +32,31 @@ PERMISSIVE_LICENSES = {
 }
 
 
+# Weights whose real license is stricter than their Hub tags say (or than a missing tag
+# suggests). Fine-tunes and conversions inherit it: they can't loosen the base model's terms.
+WEIGHT_LICENSES = {
+    # Code Apache-2.0, weights CC BY-NC because of the Emilia training data (model card).
+    "k2-fsa/OmniVoice": "cc-by-nc-4.0",
+}
+
+
+# Engines whose every public checkpoint derives from non-commercial weights, so any repo
+# with that layout is treated as non-commercial whatever its tag says.
+ENGINE_WEIGHT_LICENSES = {"omnivoice": "cc-by-nc-4.0"}
+
+
+def resolve_license(repo_id, tags=None, declared="", backend=None):
+    """The license that actually applies: a known base model's terms override the tag."""
+    if backend in ENGINE_WEIGHT_LICENSES:
+        return ENGINE_WEIGHT_LICENSES[backend]
+    repo = (repo_id or "").lower()
+    bases = [tag.lower().split(":")[-1] for tag in tags or [] if tag.lower().startswith("base_model:")]
+    for base, license_id in WEIGHT_LICENSES.items():
+        if repo == base.lower() or base.lower() in bases:
+            return license_id
+    return (declared or "").lower()
+
+
 def license_from_tags(tags):
     for tag in tags or []:
         if tag.lower().startswith("license:"):
@@ -40,7 +65,8 @@ def license_from_tags(tags):
 
 
 def license_of(entry):
-    license_id = (entry.get("license") or "").lower()
+    license_id = resolve_license(entry.get("repo_id"), declared=entry.get("license") or "",
+                                 backend=entry.get("backend"))
     if not license_id:
         for prefix, known in KNOWN_LICENSES.items():
             if entry.get("repo_id", "").startswith(prefix):
@@ -107,8 +133,23 @@ ENGINES = {
                     "languages, 48 kHz output. Runs in its own environment (Apache-2.0).",
         languages_summary="30 languages",
     ),
+    "omnivoice": Engine(
+        key="omnivoice",
+        label="OmniVoice",
+        description="A small, fast model for voice cloning and voice design in 600+ languages. "
+                    "Non-commercial: the weights are CC BY-NC 4.0. Runs in its own environment.",
+        languages_summary="600+ languages",
+    ),
 }
-VOXCPM_MODES = {"clone": "Voice cloning", "design": "Voice design"}
+VOICE_MODES = {"clone": "Voice cloning", "design": "Voice design"}
+# Engines where one model both clones and designs voices; each entry picks one "mode".
+DUAL_MODE_ENGINES = {"voxcpm", "omnivoice"}
+
+
+def entry_mode(entry):
+    """'clone' or 'design' for a dual-mode entry ('voxcpm_mode' is the older key)."""
+    mode = entry.get("mode") or entry.get("voxcpm_mode")
+    return "design" if mode == "design" else "clone"
 
 QWEN_VARIANTS = {
     "custom_voice": "Preset voices",
@@ -146,7 +187,7 @@ def key_weight_file(entry):
     """The large file whose presence means the entry's model is downloaded."""
     if entry.get("backend") == "legacy":
         return "t3_cfg.safetensors"
-    if entry.get("backend") in ("qwen3", "voxcpm"):
+    if entry.get("backend") in ("qwen3", "voxcpm", "omnivoice"):
         return "model.safetensors"
     if entry.get("backend") == "kokoro":
         return "config.json"  # plus a .pth, checked in is_downloaded
@@ -167,8 +208,8 @@ def capability_for(entry):
         return QWEN_CAPABILITY.get(entry.get("qwen_variant"), "clone")
     if entry.get("backend") == "kokoro":
         return "preset"
-    if entry.get("backend") == "voxcpm":
-        return "design" if entry.get("voxcpm_mode") == "design" else "clone"
+    if entry.get("backend") in DUAL_MODE_ENGINES:
+        return entry_mode(entry)
     return "clone"  # Chatterbox clones, or uses its built-in voice with no clip
 
 
@@ -186,8 +227,8 @@ def engine_label(entry):
     engine = engine_for(entry)
     if engine.key == "qwen3":
         return f"{engine.label} · {QWEN_VARIANTS.get(entry.get('qwen_variant'), 'unknown variant')}"
-    if engine.key == "voxcpm":
-        return f"{engine.label} · {VOXCPM_MODES.get(entry.get('voxcpm_mode'), VOXCPM_MODES['clone'])}"
+    if engine.key in DUAL_MODE_ENGINES:
+        return f"{engine.label} · {VOICE_MODES[entry_mode(entry)]}"
     return engine.label
 
 
@@ -197,9 +238,12 @@ def entry_to_json(entry):
         payload.pop("multilingual_t3_model", None)
     if payload.get("backend") != "qwen3":
         payload.pop("qwen_variant", None)
-    if payload.get("backend") != "voxcpm":
-        payload.pop("voxcpm_mode", None)
-    elif payload.get("multilingual_t3_model", "").endswith(".safetensors"):
+    payload.pop("voxcpm_mode", None)
+    if payload.get("backend") in DUAL_MODE_ENGINES:
+        payload["mode"] = entry_mode(entry)
+    else:
+        payload.pop("mode", None)
+    if payload.get("multilingual_t3_model", "").endswith(".safetensors"):
         for short, filename in WEIGHT_VERSIONS.items():
             if payload["multilingual_t3_model"] == filename:
                 payload["multilingual_t3_model"] = short
@@ -265,6 +309,9 @@ def hardware_needs(backend, repo_id=""):
     """Rough GPU memory needs, measured on an RTX 5070 Ti where noted."""
     if backend == "kokoro":
         return HardwareNeeds(2, 2, True, "Small model; also quick on a CPU.")
+    if backend == "omnivoice":
+        return HardwareNeeds(3, 4, False, "Peaks around 2.1 GB for one section and 3.4 GB for a "
+                                          "batch of 8. Not tested on a CPU.")
     if backend == "voxcpm":
         if (_billions(repo_id) or 2) < 1:
             return HardwareNeeds(4, 6, False, "The original 0.5B VoxCPM. Very slow on a CPU.")
@@ -321,6 +368,7 @@ def check_repo(repo_id, token=None):
     sizes = {sibling.rfilename: (sibling.size or 0) for sibling in (info.siblings or [])}
     license_id = license_from_tags(getattr(info, "tags", None)) or str(
         getattr(getattr(info, "card_data", None), "license", "") or "").lower()
+    license_id = resolve_license(repo_id, getattr(info, "tags", None), license_id)
     versions = tuple(short for short, filename in WEIGHT_VERSIONS.items() if filename in sizes)
     gated = bool(getattr(info, "gated", False))
     private = bool(getattr(info, "private", False))
@@ -330,6 +378,12 @@ def check_repo(repo_id, token=None):
         files = ENGINE_FILES["multilingual"] + ([WEIGHT_VERSIONS[best]] if best else ["t3_23lang.safetensors"])
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
+    elif _is_omnivoice_layout(sizes, getattr(info, "tags", None)):
+        download = sum(sizes.values())
+        access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
+        return RepoCheck(True, f"Found: OmniVoice · about {format_size(download)} to download · {access}",
+                         "omnivoice", (), download, gated, private, "",
+                         resolve_license(repo_id, backend="omnivoice"))
     elif _is_voxcpm_layout(sizes):
         download = sum(sizes.values())
         access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
@@ -368,6 +422,12 @@ def check_repo(repo_id, token=None):
 # Kokoro voice names start with a language letter; these are the ones its pipeline
 # can speak here (US/UK English, Spanish, French, Hindi, Italian, Portuguese, Mandarin).
 KOKORO_VOICE = re.compile(r"^voices/[abefhipz][fm]_\w+\.pt$")
+
+
+def _is_omnivoice_layout(files, tags=None):
+    """OmniVoice repos hold the LLM weights plus a Higgs audio tokenizer folder."""
+    return ("model.safetensors" in files and "audio_tokenizer/model.safetensors" in files
+            and ("omnivoice" in {tag.lower() for tag in tags or []} or "chat_template.jinja" in files))
 
 
 def _is_voxcpm_layout(files):
@@ -430,14 +490,14 @@ class SearchResult:
 
     @property
     def capabilities(self):
-        if self.backend == "voxcpm" and "voice design" in self.summary:
+        if self.backend in DUAL_MODE_ENGINES and "voice design" in self.summary:
             return {"clone", "design"}
         return {self.capability}
 
 
 def _classify(model):
     tags = {tag.lower() for tag in (model.tags or [])}
-    if tags & EXCLUDED_TAGS or "tiny-random" in model.id.lower():
+    if tags & EXCLUDED_TAGS or "tiny-random" in model.id.lower() or "mlx" in model.id.lower():
         return None
     files = {sibling.rfilename for sibling in (model.siblings or [])}
     if files & CHATTERBOX_KEY_FILES:
@@ -451,6 +511,8 @@ def _classify(model):
         size = "0.6B " if "0.6b" in model.id.lower() else "1.7B " if "1.7b" in model.id.lower() else ""
         label = QWEN_VARIANTS.get(variant, "variant confirmed by Check").lower()
         return "qwen3", variant, f"Qwen3-TTS {size}· {label}"
+    if _is_omnivoice_layout(files, tags):
+        return "omnivoice", "", "OmniVoice · cloning and voice design"
     if _is_voxcpm_layout(files):
         version = "VoxCPM2" if "voxcpm2" in model.id.lower() else "VoxCPM"
         return "voxcpm", "", f"{version} · cloning and voice design" if version == "VoxCPM2" \
@@ -474,6 +536,8 @@ def search_models(query="", engine="all", token=None, limit=40):
         listings.append(dict(filter="qwen3_tts", search=query or None))
         if query:
             listings.append(dict(search=query))
+    if engine in ("all", "omnivoice"):
+        listings.append(dict(search=f"omnivoice {query}".strip() if query else "omnivoice"))
     if engine in ("all", "voxcpm"):
         listings.append(dict(search=f"voxcpm {query}".strip() if query else "voxcpm"))
     if engine in ("all", "kokoro"):
@@ -499,7 +563,8 @@ def search_models(query="", engine="all", token=None, limit=40):
                 updated = model.last_modified.strftime("%b %Y") if getattr(model, "last_modified", None) else ""
                 results.append(SearchResult(model.id, backend, summary, model.downloads or 0,
                                             model.likes or 0, bool(model.gated), languages, updated, variant,
-                                            license_from_tags(model.tags)))
+                                            resolve_license(model.id, model.tags,
+                                                            license_from_tags(model.tags), backend)))
         except Exception as exc:
             raise RuntimeError(f"Hugging Face search failed: {exc}") from exc
     results.sort(key=lambda result: result.downloads, reverse=True)

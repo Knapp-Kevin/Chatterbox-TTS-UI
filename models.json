@@ -82,7 +82,7 @@
       "language_id": "en",
       "license": "apache-2.0",
       "download_bytes": 4960731866,
-      "voxcpm_mode": "clone"
+      "mode": "clone"
     },
     {
       "repo_id": "openbmb/VoxCPM2",
@@ -95,7 +95,33 @@
       "language_id": "en",
       "license": "apache-2.0",
       "download_bytes": 4960731866,
-      "voxcpm_mode": "design"
+      "mode": "design"
+    },
+    {
+      "repo_id": "k2-fsa/OmniVoice",
+      "label": "OmniVoice voice cloning",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Fast cloning in 600+ languages; needs the clip transcript. Non-commercial license.",
+      "backend": "omnivoice",
+      "language_id": "en",
+      "license": "cc-by-nc-4.0",
+      "download_bytes": 3267470260,
+      "mode": "clone"
+    },
+    {
+      "repo_id": "k2-fsa/OmniVoice",
+      "label": "OmniVoice voice design",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Builds a voice from attributes (gender, age, pitch, accent). Non-commercial license.",
+      "backend": "omnivoice",
+      "language_id": "en",
+      "license": "cc-by-nc-4.0",
+      "download_bytes": 3267470260,
+      "mode": "design"
     }
   ]
 }
