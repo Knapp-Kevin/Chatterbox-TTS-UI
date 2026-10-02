@@ -137,6 +137,7 @@ from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
 import ui_theme
 import audio_effects
 import documents
+import model_registry
 import time
 from collections import deque
 import wave
@@ -938,6 +939,160 @@ class RecordingDialog(QDialog):
         super().done(result)
 
 
+# --- Model entry editor ---
+
+
+class ModelEntryDialog(QDialog):
+    """Add or edit one models.json entry, with a live Hugging Face check."""
+
+    def __init__(self, entry, other_entries, token, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit model" if entry else "Add model")
+        self.setMinimumWidth(560)
+        self.other_entries = other_entries
+        self.token = token
+        self.original = dict(entry or {})
+        entry = dict(entry or {"backend": "multilingual", "multilingual_t3_model": "v3",
+                               "enabled": True, "language_id": "en"})
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        repo_row = QHBoxLayout()
+        self.repo_input = QLineEdit(entry.get("repo_id", ""))
+        self.repo_input.setPlaceholderText("owner/model-name")
+        self.repo_input.textEdited.connect(self._repo_edited)
+        repo_row.addWidget(self.repo_input, 1)
+        self.check_button = QPushButton("Check")
+        self.check_button.setToolTip("Look the repo up on Hugging Face and detect its engine.")
+        self.check_button.clicked.connect(self.check_repo)
+        repo_row.addWidget(self.check_button)
+        form.addRow("Hugging Face repo", repo_row)
+        self.check_label = QLabel("Enter a repo and click Check to confirm it can be loaded.")
+        self.check_label.setObjectName("Muted")
+        self.check_label.setWordWrap(True)
+        form.addRow("", self.check_label)
+
+        self.name_input = QLineEdit(entry.get("label", ""))
+        self.name_input.setPlaceholderText("Shown in the model switcher")
+        form.addRow("Name", self.name_input)
+
+        self.engine_combo = QComboBox()
+        for engine in model_registry.ENGINES.values():
+            self.engine_combo.addItem(engine.label, engine.key)
+            self.engine_combo.setItemData(
+                self.engine_combo.count() - 1, engine.description, Qt.ItemDataRole.ToolTipRole)
+        self.engine_combo.setCurrentIndex(max(0, self.engine_combo.findData(entry.get("backend"))))
+        self.engine_combo.currentIndexChanged.connect(self._engine_changed)
+        form.addRow("Engine", self.engine_combo)
+
+        self.weights_combo = QComboBox()
+        for short in model_registry.WEIGHT_VERSIONS:
+            self.weights_combo.addItem(short.upper(), short)
+        current_weights = str(entry.get("multilingual_t3_model") or "v3")
+        for short, filename in model_registry.WEIGHT_VERSIONS.items():
+            if current_weights in (short, filename):
+                self.weights_combo.setCurrentIndex(self.weights_combo.findData(short))
+        self.weights_combo.setToolTip("Which multilingual weights to load. V3 is the newest.")
+        self.weights_label = QLabel("Weights")
+        form.addRow(self.weights_label, self.weights_combo)
+
+        self.language_combo = QComboBox()
+        self.language_combo.setToolTip("Language selected by default when this model is loaded.")
+        form.addRow("Default language", self.language_combo)
+        self._preferred_language = entry.get("language_id", "en")
+
+        self.test_text_input = QLineEdit(entry.get("test_text", ""))
+        self.test_text_input.setPlaceholderText("Optional sentence used by 'Sample text'")
+        form.addRow("Sample sentence", self.test_text_input)
+        self.notes_input = QLineEdit(entry.get("notes", ""))
+        self.notes_input.setPlaceholderText("Optional")
+        form.addRow("Notes", self.notes_input)
+        self.enabled_checkbox = QCheckBox("Show in the model switcher")
+        self.enabled_checkbox.setChecked(bool(entry.get("enabled", True)))
+        form.addRow("", self.enabled_checkbox)
+        layout.addLayout(form)
+
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet("color: #d9534f;")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._engine_changed()
+
+    def _repo_edited(self, text):
+        self.check_label.setText("Click Check to confirm this repo can be loaded.")
+        self.check_label.setStyleSheet("")
+
+    def _engine_changed(self, *_args):
+        engine = model_registry.ENGINES[self.engine_combo.currentData()]
+        self.weights_combo.setVisible(engine.uses_weights_version)
+        self.weights_label.setVisible(engine.uses_weights_version)
+        current = self.language_combo.currentData() or self._preferred_language
+        self.language_combo.clear()
+        for language_id, name in get_supported_languages_for_backend(engine.key).items():
+            self.language_combo.addItem(f"{name} [{language_id}]", language_id)
+        index = self.language_combo.findData(current)
+        self.language_combo.setCurrentIndex(index if index >= 0 else max(0, self.language_combo.findData("en")))
+
+    def check_repo(self):
+        repo_id = self.repo_input.text().strip()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = model_registry.check_repo(repo_id, self.token)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.check_label.setText(result.message)
+        self.check_label.setStyleSheet("color: #3c9a3c;" if result.ok else "color: #d9534f;")
+        self.adjustSize()
+        if result.ok:
+            self.engine_combo.setCurrentIndex(self.engine_combo.findData(result.detected_backend))
+            if result.weight_versions and self.weights_combo.currentData() not in result.weight_versions:
+                self.weights_combo.setCurrentIndex(self.weights_combo.findData(result.weight_versions[0]))
+            if not self.name_input.text().strip():
+                self.name_input.setText(repo_id.split("/")[-1].replace("-", " ").replace("_", " "))
+        return result
+
+    def result_entry(self):
+        engine = self.engine_combo.currentData()
+        entry = dict(self.original)
+        entry.update({
+            "repo_id": self.repo_input.text().strip(),
+            "label": self.name_input.text().strip(),
+            "backend": engine,
+            "language_id": self.language_combo.currentData() or "en",
+            "test_text": self.test_text_input.text().strip(),
+            "notes": self.notes_input.text().strip(),
+            "enabled": self.enabled_checkbox.isChecked(),
+            "experimental": entry.get("experimental", False),
+            "multilingual_t3_model": self.weights_combo.currentData() if engine == "multilingual" else "",
+            "test_texts": entry.get("test_texts", {}),
+        })
+        return entry
+
+    def _save(self):
+        entry = self.result_entry()
+        problem = None
+        if not model_registry.is_valid_repo_id(entry["repo_id"]):
+            problem = "Enter the Hugging Face repo as owner/name."
+        elif not entry["label"]:
+            problem = "Give the model a name."
+        elif any(other.get("label") == entry["label"] for other in self.other_entries):
+            problem = "Another model already uses this name."
+        if problem:
+            self.error_label.setText(problem)
+            self.error_label.setVisible(True)
+            self.adjustSize()
+            return
+        self.accept()
+
+
 # --- ChatterboxApp ---
 
 
@@ -952,7 +1107,7 @@ class ChatterboxApp(QMainWindow):
         self.device_used = "cpu"
         self.current_model_repo = DEFAULT_MODEL_REPO
         self.current_model_backend = BACKEND_MULTILINGUAL
-        self.current_multilingual_t3_model = DEFAULT_MULTILINGUAL_T3_MODEL
+        self.current_multilingual_t3_model = resolve_multilingual_t3_model(DEFAULT_MULTILINGUAL_T3_MODEL)
         self.selected_model_repo = DEFAULT_MODEL_REPO
         self.system_has_nvidia_gpu = has_system_nvidia_gpu()
         self.cuda_runtime_issue = None
@@ -1005,9 +1160,10 @@ class ChatterboxApp(QMainWindow):
         self.text_stats_timer.setSingleShot(True)
         self.text_stats_timer.setInterval(350)
         self.text_stats_timer.timeout.connect(self.update_text_stats)
-        self.repetition_penalty = 1.2
-        self.min_p = 0.05
-        self.top_p = 1.0
+        sampling = self.app_settings.get("sampling", {})
+        self.repetition_penalty = float(sampling.get("repetition_penalty", 1.2))
+        self.min_p = float(sampling.get("min_p", 0.05))
+        self.top_p = float(sampling.get("top_p", 1.0))
 
         self.log_message_signal.connect(self.append_console_log)
         self._init_ui()
@@ -1114,10 +1270,11 @@ class ChatterboxApp(QMainWindow):
             lambda: self.sidebar.setCurrentRow(self.PAGE_VOICE))
         voice_row.addWidget(change_voice_button)
         voice_row.addStretch(1)
-        voice_row.addWidget(QLabel("Language"))
-        self.language_combo = QComboBox()
-        self.language_combo.setMinimumWidth(200)
-        voice_row.addWidget(self.language_combo)
+        voice_row.addWidget(QLabel("Model"))
+        self.model_repo_combo = QComboBox()
+        self.model_repo_combo.setMinimumWidth(190)
+        self.model_repo_combo.currentIndexChanged.connect(self.on_model_repo_changed)
+        voice_row.addWidget(self.model_repo_combo)
         generate_layout.addLayout(voice_row)
 
         text_card, text_card_layout = self._make_card()
@@ -1231,6 +1388,9 @@ class ChatterboxApp(QMainWindow):
         self.seed_input.setValue(0)
         self.seed_input.setSpecialValueText("New take each time")
         self.seed_input.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.language_combo = QComboBox()
+        add_control(2, 0, "Language", self.language_combo,
+                    "Language of the text. The list depends on the selected model.")
         add_control(1, 2, "Take number", self.seed_input,
                     "Leave on 'New take each time' for a fresh result on every run. Enter a "
                     "number to reproduce the same take exactly; the number used is shown in "
@@ -1440,55 +1600,135 @@ class ChatterboxApp(QMainWindow):
         # ---------- Model page ----------
         model_page, model_layout = self._make_page(
             "Model", "Models download once, then load from the local cache.")
-        model_card, model_card_layout = self._make_card("Active model")
-        repo_layout = QHBoxLayout()
-        self.model_repo_combo = QComboBox()
-        self.model_repo_combo.currentTextChanged.connect(self.on_model_repo_changed)
-        repo_layout.addWidget(self.model_repo_combo, 1)
-        self.load_model_button = self._accent(QPushButton("Load Selected Model"))
-        self.load_model_button.clicked.connect(self.load_model)
-        repo_layout.addWidget(self.load_model_button)
-        model_card_layout.addLayout(repo_layout)
-        self.experimental_models_checkbox = QCheckBox("Show experimental user models")
-        self.experimental_models_checkbox.toggled.connect(
-            self.on_experimental_models_toggled)
-        model_card_layout.addWidget(self.experimental_models_checkbox)
-        model_layout.addWidget(model_card)
+        models_card, models_layout = self._make_card("Models")
+        self.models_list = QListWidget()
+        self.models_list.setMinimumHeight(96)
+        self.models_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.models_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.models_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.models_list.currentRowChanged.connect(lambda _row: self.update_model_details())
+        self.models_list.itemDoubleClicked.connect(lambda _item: self.load_selected_list_model())
+        models_layout.addWidget(self.models_list, 1)
 
-        config_card, config_layout = self._make_card("Configuration")
-        self.model_config_help_label = QLabel(
-            "Edit repo_id, enabled, backend, and language_id in models.json. "
-            "Set enabled=true to make an entry appear in the picker, then use Reload Model List."
-        )
-        self.model_config_help_label.setWordWrap(True)
-        self.model_config_help_label.setTextFormat(Qt.TextFormat.PlainText)
-        config_hint = QLabel("Add or enable models in models.json, then click Reload Model List.")
-        config_hint.setObjectName("Muted")
-        config_layout.addWidget(config_hint)
-        self.model_details_label = QLabel("")
-        self.model_details_label.setWordWrap(True)
-        self.model_details_label.setTextFormat(Qt.TextFormat.PlainText)
-        config_grid = QGridLayout()
-        self.open_models_config_button = QPushButton("Open models.json")
-        self.open_models_config_button.clicked.connect(self.open_models_config)
-        self.reload_models_button = QPushButton("Reload Model List")
-        self.reload_models_button.clicked.connect(self.reload_models_config)
-        self.model_details_button = QPushButton("Model Details")
-        self.model_details_button.clicked.connect(self.show_model_details_dialog)
-        self.model_help_button = QPushButton("Custom Models Help")
-        self.model_help_button.clicked.connect(self.show_model_help_dialog)
-        self.hf_token_button = QPushButton("HF Token...")
-        self.hf_token_button.clicked.connect(self.open_hf_token_dialog)
-        self.sampling_settings_button = QPushButton("Sampling...")
-        self.sampling_settings_button.clicked.connect(self.open_sampling_settings_dialog)
-        for index, button in enumerate((
-                self.open_models_config_button, self.reload_models_button,
-                self.model_details_button, self.model_help_button,
-                self.hf_token_button, self.sampling_settings_button)):
-            config_grid.addWidget(button, index // 3, index % 3)
-        config_layout.addLayout(config_grid)
-        model_layout.addWidget(config_card)
-        model_layout.addStretch(1)
+        details_header = QHBoxLayout()
+        self.model_name_label = QLabel()
+        self.model_name_label.setObjectName("CardTitle")
+        self.model_name_label.setTextFormat(Qt.TextFormat.PlainText)
+        details_header.addWidget(self.model_name_label)
+        self.model_active_chip = QLabel("Active")
+        self.model_active_chip.setObjectName("VoiceChip")
+        details_header.addWidget(self.model_active_chip)
+        details_header.addStretch(1)
+        add_model_button = self._link(QPushButton("+ Add model..."))
+        add_model_button.clicked.connect(self.add_model)
+        details_header.addWidget(add_model_button)
+        models_layout.addLayout(details_header)
+        details_grid = QGridLayout()
+        details_grid.setHorizontalSpacing(14)
+        details_grid.setColumnStretch(1, 1)
+        self.model_engine_label = QLabel()
+        self.model_repo_label = QLabel()
+        self.model_repo_label.setOpenExternalLinks(True)
+        self.model_status_label = QLabel()
+        # Long notes are clipped (full text in the tooltip) instead of widening the window.
+        for label in (self.model_engine_label, self.model_repo_label, self.model_status_label):
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        for row, (title, widget) in enumerate((
+                ("Engine", self.model_engine_label),
+                ("Repo", self.model_repo_label),
+                ("Status", self.model_status_label))):
+            caption = QLabel(title)
+            caption.setObjectName("Muted")
+            details_grid.addWidget(caption, row, 0)
+            details_grid.addWidget(widget, row, 1)
+        models_layout.addLayout(details_grid)
+        model_actions = QHBoxLayout()
+        self.load_model_button = self._accent(QPushButton("Load this model"))
+        self.load_model_button.clicked.connect(self.load_selected_list_model)
+        model_actions.addWidget(self.load_model_button)
+        model_actions.addStretch(1)
+        self.edit_model_button = QPushButton("Edit...")
+        self.edit_model_button.clicked.connect(self.edit_model)
+        self.duplicate_model_button = QPushButton("Duplicate")
+        self.duplicate_model_button.setToolTip("Copy this entry, e.g. to try other weights or a default language.")
+        self.duplicate_model_button.clicked.connect(self.duplicate_model)
+        self.remove_model_button = QPushButton("Remove")
+        self.remove_model_button.setToolTip("Remove from the list. Downloaded files stay in the cache.")
+        self.remove_model_button.clicked.connect(self.remove_model)
+        for button in (self.edit_model_button, self.duplicate_model_button, self.remove_model_button):
+            model_actions.addWidget(button)
+        models_layout.addLayout(model_actions)
+        model_layout.addWidget(models_card, 1)
+
+        hf_card, hf_layout = self._make_card("Hugging Face access")
+        hf_row = QHBoxLayout()
+        self.hf_token_input = QLineEdit(str(self.app_settings.get("hf_token", "")))
+        self.hf_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_token_input.setPlaceholderText("hf_... (optional)")
+        self.hf_token_input.returnPressed.connect(self.save_hf_token)
+        hf_row.addWidget(self.hf_token_input, 1)
+        save_token_button = QPushButton("Save")
+        save_token_button.clicked.connect(self.save_hf_token)
+        hf_row.addWidget(save_token_button)
+        test_token_button = QPushButton("Test")
+        test_token_button.clicked.connect(self.test_hf_token)
+        hf_row.addWidget(test_token_button)
+        hf_layout.addLayout(hf_row)
+        self.hf_token_status = QLabel()
+        self.hf_token_status.setObjectName("Muted")
+        self.hf_token_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        hf_layout.addWidget(self.hf_token_status)
+        model_layout.addWidget(hf_card)
+
+        tuning_card, tuning_layout = self._make_card()
+        tuning_header = QHBoxLayout()
+        self.tuning_toggle = self._link(QPushButton())
+        self.tuning_toggle.clicked.connect(lambda: self.set_tuning_expanded(self.tuning_panel.isHidden()))
+        tuning_header.addWidget(self.tuning_toggle)
+        self.tuning_summary_label = QLabel()
+        self.tuning_summary_label.setObjectName("Muted")
+        tuning_header.addWidget(self.tuning_summary_label)
+        tuning_header.addStretch(1)
+        tuning_layout.addLayout(tuning_header)
+        self.tuning_panel = QWidget()
+        tuning_grid = QGridLayout(self.tuning_panel)
+        tuning_grid.setContentsMargins(0, 0, 0, 0)
+        tuning_grid.setHorizontalSpacing(14)
+
+        def tuning_spin(minimum, maximum, step, value):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setSingleStep(step)
+            spin.setDecimals(2)
+            spin.setValue(value)
+            spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+            spin.valueChanged.connect(self.on_tuning_changed)
+            return spin
+
+        self.repetition_spin = tuning_spin(0.5, 3.0, 0.05, self.repetition_penalty)
+        self.min_p_spin = tuning_spin(0.0, 1.0, 0.01, self.min_p)
+        self.top_p_spin = tuning_spin(0.0, 1.0, 0.01, self.top_p)
+        for column, (title, spin, tip) in enumerate((
+                ("Repetition control", self.repetition_spin,
+                 "Discourages repeated words and stutters. Default 1.20; raise slightly if "
+                 "phrases repeat. [repetition_penalty]"),
+                ("Unlikely-sound filter", self.min_p_spin,
+                 "Skips very unlikely sounds. Default 0.05; higher is steadier but flatter. [min_p]"),
+                ("Top-p", self.top_p_spin,
+                 "Limits choices to the most likely sounds. 1.00 means off. [top_p]"))):
+            caption = QLabel(title)
+            caption.setToolTip(tip)
+            spin.setToolTip(tip)
+            row, col = divmod(column, 2)
+            tuning_grid.addWidget(caption, row, col * 2)
+            tuning_grid.addWidget(spin, row, col * 2 + 1)
+        tuning_grid.setColumnStretch(1, 1)
+        tuning_grid.setColumnStretch(3, 1)
+        tuning_reset = QPushButton("Reset")
+        tuning_reset.clicked.connect(self.reset_tuning)
+        tuning_grid.addWidget(tuning_reset, 1, 3, Qt.AlignmentFlag.AlignRight)
+        tuning_layout.addWidget(self.tuning_panel)
+        model_layout.addWidget(tuning_card)
         self.pages.addWidget(model_page)
 
         # ---------- Log page ----------
@@ -1528,9 +1768,10 @@ class ChatterboxApp(QMainWindow):
         self.model_load_progress.setEnabled(False)
         qt_status_bar.addPermanentWidget(self.model_load_progress)
         self.refresh_model_repo_options()
-        self.on_experimental_models_toggled(False)
         self.refresh_language_options()
-        self.refresh_hf_token_button_tooltip()
+        self.refresh_models_page()
+        self.update_hf_token_status()
+        self.set_tuning_expanded(bool(self.app_settings.get("tuning_expanded", False)))
         self.refresh_recordings_list()
         self.set_reference_audio(None)
 
@@ -1627,16 +1868,8 @@ class ChatterboxApp(QMainWindow):
         hf_token = str(self.app_settings.get("hf_token", "")).strip()
         if hf_token:
             os.environ["HF_TOKEN"] = hf_token
-            self.hf_token_button_tooltip = "Saved token is active for Hugging Face downloads."
         else:
             os.environ.pop("HF_TOKEN", None)
-            self.hf_token_button_tooltip = (
-                "Optional. Set an HF token for higher rate limits and authenticated downloads."
-            )
-
-    def refresh_hf_token_button_tooltip(self):
-        if hasattr(self, "hf_token_button"):
-            self.hf_token_button.setToolTip(self.hf_token_button_tooltip)
 
     def set_status_message(self, message):
         compact_message = " ".join(str(message).split())
@@ -1700,6 +1933,7 @@ class ChatterboxApp(QMainWindow):
         self.preview_button.setEnabled(False)
         self.open_document_button.setEnabled(False)
         self.load_model_button.setEnabled(False)
+        self.model_repo_combo.setEnabled(False)
         self.generation_progress.setValue(0)
         self.generation_progress.setVisible(True)
         self.activity_label.setText("Previewing..." if preview else "Starting...")
@@ -2029,19 +2263,234 @@ class ChatterboxApp(QMainWindow):
                 "Check that the right microphone is selected, that it isn't muted, and that "
                 "Windows allows desktop apps to use it (Settings > Privacy & security > Microphone).")
 
-    def on_experimental_models_toggled(self, checked):
-        self.refresh_model_repo_options()
-        self.model_repo_combo.setEnabled(checked)
-        self.use_preset_button.setEnabled(True)
+    def on_model_repo_changed(self, _index):
+        entry = self.get_selected_model_entry()
+        self.selected_model_repo = entry["repo_id"]
         self.refresh_model_repo_tooltip()
-        self.refresh_model_details()
         self.refresh_language_options()
+        if self.entry_key(entry) != self.loaded_entry_key():
+            self.load_model(entry)
 
-    def on_model_repo_changed(self, _text):
-        self.selected_model_repo = self.get_selected_model_entry()["repo_id"]
+    # --- Model page ---
+
+    @staticmethod
+    def entry_key(entry):
+        return (entry.get("repo_id"), entry.get("backend"), entry.get("multilingual_t3_model") or "")
+
+    def loaded_entry_key(self):
+        backend = self.current_model_backend
+        weights = self.current_multilingual_t3_model if backend == BACKEND_MULTILINGUAL else ""
+        return (self.current_model_repo, backend, weights or "")
+
+    def refresh_models_page(self, select_entry=None):
+        if not hasattr(self, "models_list"):
+            return
+        previous = select_entry or self.selected_list_entry()
+        sizes = model_registry.cached_repo_sizes()
+        self.models_list.blockSignals(True)
+        self.models_list.clear()
+        select_row = 0
+        for row, entry in enumerate(self.model_entries):
+            engine = model_registry.engine_for(entry)
+            languages = (engine.languages_summary if entry.get("backend") == BACKEND_MULTILINGUAL
+                         else "English")
+            if model_registry.is_downloaded(entry):
+                status = f"downloaded ({model_registry.format_size(sizes.get(entry['repo_id'], 0))} repo cache)"
+            else:
+                status = "not downloaded"
+            active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
+            hidden = "" if entry.get("enabled", True) else " \u00b7 hidden"
+            marker = "\u25cf " if active else "    "
+            item = QListWidgetItem(f"{marker}{entry['label']}\n      {engine.label} \u00b7 {languages} \u00b7 {status}{hidden}")
+            item.setData(Qt.ItemDataRole.UserRole, row)
+            item.setToolTip(f"{entry['repo_id']}\n{engine.label} \u00b7 {languages} \u00b7 {status}"
+                            + ("\nHidden from the model switcher" if hidden else ""))
+            entry["_status"] = status
+            if active:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.models_list.addItem(item)
+            if previous is not None and self.entry_key(entry) == self.entry_key(previous) \
+                    and entry.get("label") == previous.get("label"):
+                select_row = row
+        self.models_list.setCurrentRow(select_row)
+        self.models_list.blockSignals(False)
+        self.update_model_details()
+
+    def selected_list_entry(self):
+        if not hasattr(self, "models_list"):
+            return None
+        item = self.models_list.currentItem()
+        if item is None:
+            return None
+        row = item.data(Qt.ItemDataRole.UserRole)
+        return self.model_entries[row] if isinstance(row, int) and row < len(self.model_entries) else None
+
+    def update_model_details(self):
+        entry = self.selected_list_entry()
+        has_entry = entry is not None
+        for widget in (self.edit_model_button, self.duplicate_model_button, self.remove_model_button):
+            widget.setEnabled(has_entry)
+        if not has_entry:
+            self.model_name_label.setText("No models")
+            self.model_active_chip.setVisible(False)
+            return
+        engine = model_registry.engine_for(entry)
+        self.model_name_label.setText(entry["label"])
+        active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
+        self.model_active_chip.setVisible(active)
+        engine_text = engine.label
+        if engine.uses_weights_version:
+            engine_text += f" \u00b7 weights {model_registry.weights_file(entry).split('_')[-1].split('.')[0].upper()}"
+        self.model_engine_label.setText(engine_text)
+        self.model_engine_label.setToolTip(engine.description)
+        repo = entry["repo_id"]
+        self.model_repo_label.setText(f'<a href="https://huggingface.co/{repo}">{repo}</a>')
+        status = entry.get("_status", "")
+        if entry.get("notes"):
+            status += f" \u00b7 {entry['notes']}"
+        self.model_status_label.setText(status[:1].upper() + status[1:])
+        self.model_status_label.setToolTip(status)
+        busy = getattr(self, "model_is_loading", False) or self.is_generating
+        self.load_model_button.setEnabled(not busy and not active)
+        self.load_model_button.setText("Loaded" if active else "Load this model")
+        is_default = repo == DEFAULT_MODEL_REPO and entry.get("backend") == BACKEND_MULTILINGUAL \
+            and sum(1 for e in self.model_entries if self.entry_key(e) == self.entry_key(entry)) == 1
+        self.remove_model_button.setEnabled(not is_default and not active)
+        self.remove_model_button.setToolTip(
+            "The official model can't be removed; it is the fallback." if is_default else
+            "Unload it first by switching to another model." if active else
+            "Remove from the list. Downloaded files stay in the cache.")
+
+    def persist_model_entries(self, entries, select_entry=None):
+        try:
+            model_registry.save_models_config(self.model_config_path, entries)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could Not Save", f"{MODEL_CONFIG_FILENAME} could not be written:\n{exc}")
+            return False
+        self.model_entries = load_models_config(self.model_config_path)
+        self.refresh_model_repo_options()
         self.refresh_model_repo_tooltip()
-        self.refresh_model_details()
-        self.refresh_language_options()
+        self.refresh_models_page(select_entry)
+        self.set_status_message(f"Status: Saved model list to {MODEL_CONFIG_FILENAME}.")
+        return True
+
+    def _edit_entry_dialog(self, entry, replacing=None):
+        others = [e for e in self.model_entries if e is not replacing]
+        dialog = ModelEntryDialog(entry, others, self.app_settings.get("hf_token"), self)
+        if not dialog_accepted(dialog.exec()):
+            return None
+        return dialog.result_entry()
+
+    def add_model(self):
+        new_entry = self._edit_entry_dialog(None)
+        if new_entry:
+            self.persist_model_entries(self.model_entries + [new_entry], new_entry)
+
+    def edit_model(self):
+        entry = self.selected_list_entry()
+        if entry is None:
+            return
+        updated = self._edit_entry_dialog(entry, replacing=entry)
+        if updated:
+            entries = [updated if e is entry else e for e in self.model_entries]
+            self.persist_model_entries(entries, updated)
+
+    def duplicate_model(self):
+        entry = self.selected_list_entry()
+        if entry is None:
+            return
+        copy = dict(entry)
+        base, n = f"{entry['label']} copy", 2
+        copy["label"] = base
+        while any(e.get("label") == copy["label"] for e in self.model_entries):
+            copy["label"] = f"{base} {n}"
+            n += 1
+        updated = self._edit_entry_dialog(copy)
+        if updated:
+            self.persist_model_entries(self.model_entries + [updated], updated)
+
+    def remove_model(self):
+        entry = self.selected_list_entry()
+        if entry is None:
+            return
+        answer = QMessageBox.question(
+            self, "Remove Model",
+            f"Remove '{entry['label']}' from the model list?\n\nDownloaded files stay in the "
+            "Hugging Face cache, so adding it back later won't download again.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.persist_model_entries([e for e in self.model_entries if e is not entry])
+
+    def load_selected_list_model(self):
+        entry = self.selected_list_entry()
+        if entry is None:
+            return
+        index = self.model_repo_combo.findText(entry["label"])
+        if index >= 0 and index != self.model_repo_combo.currentIndex():
+            self.model_repo_combo.setCurrentIndex(index)  # loads via the switcher
+        elif self.entry_key(entry) != self.loaded_entry_key() or self.model is None:
+            self.load_model(entry)
+
+    def save_hf_token(self):
+        token = self.hf_token_input.text().strip()
+        if token:
+            self.app_settings["hf_token"] = token
+        else:
+            self.app_settings.pop("hf_token", None)
+        self.apply_hf_token_setting()
+        self.save_app_settings()
+        self.update_hf_token_status("Token saved." if token else "Token removed.")
+
+    def test_hf_token(self):
+        token = self.hf_token_input.text().strip()
+        if not token:
+            self.update_hf_token_status("Enter a token to test.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, message = model_registry.whoami(token)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.update_hf_token_status(message, ok)
+
+    def update_hf_token_status(self, message=None, ok=None):
+        saved = bool(self.app_settings.get("hf_token"))
+        base = ("A token is saved and used for downloads." if saved else
+                "Optional: only needed for gated or private repos.")
+        self.hf_token_status.setText(f"{message}  {base}" if message else base)
+        color = "#3c9a3c" if ok else "#d9534f" if ok is False else ""
+        self.hf_token_status.setStyleSheet(f"color: {color};" if color else "")
+        self.hf_token_status.setToolTip(
+            "Public models need no token. A token unlocks gated or private repos and higher "
+            "download limits. It is stored only in app_settings.json on this computer (ignored "
+            "by git), never in models.json.")
+
+    def on_tuning_changed(self, *_args):
+        self.repetition_penalty = self.repetition_spin.value()
+        self.min_p = self.min_p_spin.value()
+        self.top_p = self.top_p_spin.value()
+        self.app_settings["sampling"] = {
+            "repetition_penalty": self.repetition_penalty, "min_p": self.min_p, "top_p": self.top_p}
+        defaults = (abs(self.repetition_penalty - 1.2) < 1e-9 and abs(self.min_p - 0.05) < 1e-9
+                    and abs(self.top_p - 1.0) < 1e-9)
+        self.tuning_summary_label.setText("defaults" if defaults else
+                                          f"repetition {self.repetition_penalty:.2f}, "
+                                          f"min-p {self.min_p:.2f}, top-p {self.top_p:.2f}")
+
+    def reset_tuning(self):
+        self.repetition_spin.setValue(1.2)
+        self.min_p_spin.setValue(0.05)
+        self.top_p_spin.setValue(1.0)
+
+    def set_tuning_expanded(self, expanded):
+        self.tuning_panel.setVisible(expanded)
+        arrow = "\u25be" if expanded else "\u25b8"
+        self.tuning_toggle.setText(f"{arrow} Fine-tuning")
+        self.app_settings["tuning_expanded"] = expanded
+        self.on_tuning_changed()
+        if self.isVisible():
+            self.update_minimum_size()
 
     def get_selected_model_repo(self):
         return self.get_selected_model_entry()["repo_id"]
@@ -2051,15 +2500,7 @@ class ChatterboxApp(QMainWindow):
             entry for entry in self.model_entries
             if entry.get("enabled", True)
         ]
-        if self.experimental_models_checkbox.isChecked():
-            return enabled_entries
-
-        default_entries = [
-            entry for entry in enabled_entries
-            if entry["repo_id"] == DEFAULT_MODEL_REPO and
-            entry.get("backend") == BACKEND_MULTILINGUAL
-        ]
-        return default_entries or enabled_entries[:1]
+        return enabled_entries or self.model_entries[:1]
 
     def refresh_model_repo_options(self):
         selected_label = None
@@ -2070,16 +2511,17 @@ class ChatterboxApp(QMainWindow):
         self.model_repo_combo.blockSignals(True)
         self.model_repo_combo.clear()
         for index, entry in enumerate(visible_entries):
-            self.model_repo_combo.addItem(
-                f"{entry['label']} [{entry['repo_id']}]",
-                index,
-            )
+            self.model_repo_combo.addItem(entry["label"], index)
+            self.model_repo_combo.setItemData(
+                index, f"{entry['repo_id']} \u00b7 {model_registry.engine_for(entry).label}",
+                Qt.ItemDataRole.ToolTipRole)
 
         selected_index = -1
         if selected_label:
+            selected_index = self.model_repo_combo.findText(selected_label)
+        if selected_index < 0:
             for index, entry in enumerate(visible_entries):
-                display_text = f"{entry['label']} [{entry['repo_id']}]"
-                if display_text == selected_label:
+                if self.entry_key(entry) == self.loaded_entry_key():
                     selected_index = index
                     break
 
@@ -2105,157 +2547,12 @@ class ChatterboxApp(QMainWindow):
 
     def refresh_model_repo_tooltip(self):
         selected_entry = self.get_selected_model_entry()
-        notes = selected_entry.get("notes", "")
-        if self.experimental_models_checkbox.isChecked():
-            tooltip = (
-                f"Edit {MODEL_CONFIG_FILENAME} to add or change model repos. "
-                "ResembleAI/chatterbox remains the default official multilingual repo."
-            )
-            if notes:
-                tooltip += f"\n\nNotes: {notes}"
-        else:
-            tooltip = (
-                f"Enable 'Experimental user models' to select a repo from {MODEL_CONFIG_FILENAME}."
-            )
+        tooltip = (f"{selected_entry['repo_id']} \u00b7 "
+                   f"{model_registry.engine_for(selected_entry).label}\n"
+                   "Switching loads the model. Manage models on the Model page.")
+        if selected_entry.get("notes"):
+            tooltip += f"\n\n{selected_entry['notes']}"
         self.model_repo_combo.setToolTip(tooltip)
-
-    def refresh_model_details(self):
-        if not self.model_entries:
-            self.model_details_label.setText(
-                f"No active models found in {MODEL_CONFIG_FILENAME}."
-            )
-            return
-
-        selected_entry = self.get_selected_model_entry()
-        detail_lines = [
-            f"Backend: {selected_entry.get('backend', BACKEND_MULTILINGUAL)}",
-            f"Repo: {selected_entry['repo_id']}",
-        ]
-        if selected_entry.get("backend") == BACKEND_MULTILINGUAL:
-            detail_lines.append(
-                f"Multilingual T3 model: {selected_entry.get('multilingual_t3_model', DEFAULT_MULTILINGUAL_T3_MODEL)}"
-            )
-        if selected_entry.get("experimental"):
-            detail_lines.append("Experimental entry.")
-        notes = selected_entry.get("notes", "")
-        if notes:
-            detail_lines.append(f"Notes: {notes}")
-        self.model_details_label.setText("\n".join(detail_lines))
-
-    def show_model_details_dialog(self):
-        self.refresh_model_details()
-        QMessageBox.information(
-            self,
-            "Model Details",
-            self.model_details_label.text() or "No model details available.",
-        )
-
-    def show_model_help_dialog(self):
-        QMessageBox.information(
-            self,
-            "Custom Models Help",
-            (
-                self.model_config_help_label.text()
-                + "\n\nOptional field: multilingual_t3_model can be set to v3 or v2 for multilingual entries."
-                + "\n\nOptional: set an HF token from the UI if you want authenticated Hugging Face downloads."
-            ),
-        )
-
-    def open_hf_token_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Hugging Face Token")
-        layout = QFormLayout(dialog)
-
-        token_input = QLineEdit(dialog)
-        token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        token_input.setPlaceholderText("hf_...")
-        token_input.setText(str(self.app_settings.get("hf_token", "")))
-        layout.addRow("HF_TOKEN", token_input)
-
-        note_label = QLabel(
-            "Optional. Used for higher rate limits and authenticated Hugging Face downloads. "
-            "Leave blank to remove the saved token."
-        )
-        note_label.setWordWrap(True)
-        note_label.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addRow(note_label)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel,
-            parent=dialog,
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            token_value = token_input.text().strip()
-            if token_value:
-                self.app_settings["hf_token"] = token_value
-            else:
-                self.app_settings.pop("hf_token", None)
-            self.apply_hf_token_setting()
-            self.save_app_settings()
-            self.refresh_hf_token_button_tooltip()
-            self.set_status_message(
-                "Status: Hugging Face token settings updated."
-            )
-
-    def open_sampling_settings_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Advanced Sampling Controls")
-        layout = QFormLayout(dialog)
-
-        repetition_penalty_input = QDoubleSpinBox(dialog)
-        repetition_penalty_input.setRange(0.5, 3.0)
-        repetition_penalty_input.setSingleStep(0.05)
-        repetition_penalty_input.setDecimals(2)
-        repetition_penalty_input.setValue(self.repetition_penalty)
-        layout.addRow("Repetition Penalty", repetition_penalty_input)
-
-        min_p_input = QDoubleSpinBox(dialog)
-        min_p_input.setRange(0.0, 1.0)
-        min_p_input.setSingleStep(0.01)
-        min_p_input.setDecimals(2)
-        min_p_input.setValue(self.min_p)
-        layout.addRow("Min P", min_p_input)
-
-        top_p_input = QDoubleSpinBox(dialog)
-        top_p_input.setRange(0.0, 1.0)
-        top_p_input.setSingleStep(0.01)
-        top_p_input.setDecimals(2)
-        top_p_input.setValue(self.top_p)
-        layout.addRow("Top P", top_p_input)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.RestoreDefaults,
-            parent=dialog,
-        )
-        restore_defaults_button = buttons.button(
-            QDialogButtonBox.StandardButton.RestoreDefaults
-        )
-        restore_defaults_button.clicked.connect(
-            lambda: (
-                repetition_penalty_input.setValue(1.2),
-                min_p_input.setValue(0.05),
-                top_p_input.setValue(1.0),
-            )
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.repetition_penalty = repetition_penalty_input.value()
-            self.min_p = min_p_input.value()
-            self.top_p = top_p_input.value()
-            self.sampling_settings_button.setToolTip(
-                f"repetition_penalty={self.repetition_penalty:.2f}, "
-                f"min_p={self.min_p:.2f}, top_p={self.top_p:.2f}"
-            )
 
     def refresh_language_options(self):
         selected_entry = self.get_selected_model_entry()
@@ -2302,54 +2599,6 @@ class ChatterboxApp(QMainWindow):
             self.document_label.clear()
             self.text_input.setPlainText(preset_text)
 
-    def open_models_config(self):
-        opened = QDesktopServices.openUrl(
-            QUrl.fromLocalFile(self.model_config_path)
-        )
-        if not opened:
-            QMessageBox.warning(
-                self,
-                "Open Config Failed",
-                f"Could not open {self.model_config_path}.",
-            )
-
-    def reload_models_config(self):
-        _payload, load_error = read_models_config_payload(self.model_config_path)
-        if load_error:
-            QMessageBox.warning(
-                self,
-                "Model Config Error",
-                f"{load_error}\n\nThe current in-memory model list was left unchanged.",
-            )
-            return
-
-        reloaded_entries = load_models_config(self.model_config_path)
-        active_entries = [
-            entry for entry in reloaded_entries
-            if entry.get("enabled", True)
-        ]
-        if not active_entries:
-            QMessageBox.warning(
-                self,
-                "No Active Models",
-                f"{MODEL_CONFIG_FILENAME} does not contain any enabled model entries.",
-            )
-            return
-
-        previous_selection = self.model_repo_combo.currentText()
-        self.model_entries = reloaded_entries
-        self.refresh_model_repo_options()
-        if previous_selection:
-            index = self.model_repo_combo.findText(previous_selection)
-            if index >= 0:
-                self.model_repo_combo.setCurrentIndex(index)
-        self.refresh_model_repo_tooltip()
-        self.refresh_model_details()
-        self.refresh_language_options()
-        self.set_status_message(
-            f"Status: Reloaded model list from {MODEL_CONFIG_FILENAME}."
-        )
-
     def set_model_loading_state(self, is_loading):
         if is_loading:
             self.model_load_progress.setEnabled(True)
@@ -2358,25 +2607,23 @@ class ChatterboxApp(QMainWindow):
             self.model_load_progress.setRange(0, 1)
             self.model_load_progress.setValue(0)
             self.model_load_progress.setEnabled(False)
-        self.load_model_button.setEnabled(not is_loading)
-        self.experimental_models_checkbox.setEnabled(not is_loading)
-        self.model_repo_combo.setEnabled(
-            not is_loading and self.experimental_models_checkbox.isChecked()
-        )
+        self.model_is_loading = is_loading
+        self.model_repo_combo.setEnabled(not is_loading)
         self.use_preset_button.setEnabled(not is_loading)
-        self.reload_models_button.setEnabled(not is_loading)
-        self.open_models_config_button.setEnabled(not is_loading)
+        self.update_model_details()
         if is_loading:
             self.language_combo.setEnabled(False)
         else:
             self.refresh_language_options()
 
-    def load_model(self):
+    def load_model(self, selected_entry=None):
         if not CHATTERBOX_AVAILABLE:
             QMessageBox.critical(
                 self, "Error", "ChatterboxTTS library not installed.")
             return
-        selected_entry = self.get_selected_model_entry()
+        if getattr(self, "model_is_loading", False):
+            return
+        selected_entry = selected_entry or self.get_selected_model_entry()
         selected_repo = selected_entry["repo_id"]
         selected_backend = selected_entry.get("backend", BACKEND_MULTILINGUAL)
         selected_multilingual_t3_model = selected_entry.get(
@@ -2387,9 +2634,8 @@ class ChatterboxApp(QMainWindow):
         self.current_model_backend = selected_backend
         self.current_multilingual_t3_model = selected_multilingual_t3_model
         self.set_status_message(
-            f"Status: Loading model from {selected_repo} using {selected_backend} backend"
-            f"{f' ({selected_multilingual_t3_model})' if selected_backend == BACKEND_MULTILINGUAL else ''}. "
-            "If this is the first run or a new repo, model files may still be downloading in the console."
+            f"Status: Loading {selected_entry['label']}. A model that isn't downloaded yet "
+            "is fetched first; progress appears on the Log page."
         )
         self.generate_button.setEnabled(False)
         self.preview_button.setEnabled(False)
@@ -2419,8 +2665,7 @@ class ChatterboxApp(QMainWindow):
         self.preview_button.setEnabled(True)
         self.set_model_loading_state(False)
         self.update_text_stats()
-        self.on_experimental_models_toggled(
-            self.experimental_models_checkbox.isChecked())
+        self.refresh_models_page()
         if self.system_has_nvidia_gpu and self.device_used == "cpu":
             details = self.cuda_runtime_issue or (
                 "This Python environment is using a CPU-only PyTorch build."
@@ -2440,8 +2685,7 @@ class ChatterboxApp(QMainWindow):
         self.generate_button.setEnabled(False)
         self.preview_button.setEnabled(False)
         self.set_model_loading_state(False)
-        self.on_experimental_models_toggled(
-            self.experimental_models_checkbox.isChecked())
+        self.refresh_models_page()
         QMessageBox.critical(self, "Model Load Error", error_msg)
 
     def on_generation_thread_finished(self):
@@ -2463,7 +2707,8 @@ class ChatterboxApp(QMainWindow):
         self.generate_button.setEnabled(True)
         self.preview_button.setEnabled(True)
         self.open_document_button.setEnabled(True)
-        self.load_model_button.setEnabled(True)
+        self.model_repo_combo.setEnabled(not getattr(self, "model_is_loading", False))
+        self.update_model_details()
         self.generation_progress.setVisible(False)
         if not self.keep_take_button.isVisible():
             self.activity_label.clear()

@@ -74,10 +74,9 @@ Windows remains the primary maintained path.
     *   Text input for speech synthesis.
     *   Load reference audio files (`.wav`, `.mp3`, `.flac`) for voice cloning.
     *   Record a reference clip from a microphone directly in the app.
-    *   Model repo picker backed by `models.json`.
+    *   Model switcher on the Generate page; the **Model** page lists every model with its engine, languages and download status, and lets you add, edit, duplicate or remove entries (saved to `models.json` for you). **Check** looks a repo up on Hugging Face, detects which engine can load it, and shows the download size before anything is downloaded.
     *   Explicit language selector for multilingual models.
-    *   `Open models.json` and `Reload Model List` actions.
-    *   `Model Details`, `Custom Models Help`, `HF Token...`, and `Sampling...` dialogs for advanced multilingual controls.
+    *   Hugging Face token field with a **Test** button (stored locally in `app_settings.json`, never in `models.json`) and a collapsible **Fine-tuning** section for repetition control, min-p and top-p.
     *   Per-model notes and language-specific test presets.
     *   Adjustable parameters:
         *   Exaggeration
@@ -151,10 +150,9 @@ Windows remains the primary maintained path.
     *   Subsequent launches should be much faster, but the launcher still performs quick environment checks before starting the app.
 
 3.  **Using the Application (`main.py`):**
-    *   **Load Model:** The default model attempts to load automatically on startup. Use `Load Selected Model` to switch or reload.
-    *   **Experimental multilingual models:** enable this option to expose the full `models.json` list instead of only the recommended default entry.
-    *   **Custom repos:** use `Open models.json`, edit the entries you want, then press `Reload Model List`.
-    *   **Optional HF token:** use `HF Token...` if you want authenticated Hugging Face downloads and higher rate limits.
+    *   **Load Model:** The default model loads automatically on startup. Pick another model in the Generate page's model switcher, or use **Load this model** on the Model page.
+    *   **Custom repos:** on the Model page click **+ Add model...**, enter the Hugging Face repo, click **Check**, then **Save**. Entries can be hidden from the switcher without deleting them.
+    *   **Optional HF token:** paste it under **Hugging Face access** on the Model page and click **Save** (use **Test** to confirm it works). Only needed for gated or private repos or higher download limits.
         *   Get one from [Hugging Face Settings > Access Tokens](https://huggingface.co/settings/tokens).
         *   Create a token with `Read` access.
         *   Paste it into the app.
@@ -167,7 +165,7 @@ Windows remains the primary maintained path.
     *   **Adjust Parameters:** Use the sliders and seed input to fine-tune the output.
         *   **CFG/Pace:** Lower values (e.g., 0.2-0.4) can slow down speech and improve pacing.
         *   **Exaggeration:** Default 0.5 is usually good. Higher values can be more expressive but also faster.
-        *   **Sampling...:** Opens advanced multilingual sampling controls for repetition penalty, min-p, and top-p.
+        *   **Fine-tuning (Model page):** repetition control, unlikely-sound filter (min-p) and top-p for advanced users.
     *   **Generate Audio:** Click "Generate Audio". The status bar will show progress if the text is split into multiple chunks.
     *   **Playback:**
         *   If "Auto-play" is checked, audio plays automatically.
@@ -252,9 +250,9 @@ If you prefer not to use the `run.bat` script or are on a different OS:
 *   **The app never opens a window / closes before UI appears:** Check the newest `logs/app_startup_*.log` file. This captures import-time and pre-window startup crashes that would otherwise be hidden by `pythonw.exe`.
 *   **No audio playback / Media Player Errors**: Make sure FFmpeg is correctly installed and its `bin` directory is in your system's PATH.
 *   **Slow Generation**: Generating speech for long texts by stitching multiple chunks will take time. The number of chunks depends on the text length and sentence structure. Experiment with the `CFG/Pace` and `Exaggeration` sliders for speech rate.
-*   **Custom repo does not load:** Verify that the repo layout matches the selected backend in `models.json`. Not every Hugging Face repo is a drop-in replacement.
+*   **Custom repo does not load:** Use **Check** in the model editor. It reports which files the repo contains and whether either Chatterbox engine can load them; GGUF, ONNX, MLX and partial fine-tunes are not drop-in replacements.
 *   **`dicta_onnx not available - Hebrew text processing skipped`**: This is an optional Hebrew preprocessing warning from the upstream stack. Generation can still work, but Hebrew normalization may be reduced unless the optional dependency is available in the environment.
-*   **`Warning: You are sending unauthenticated requests to the HF Hub`**: Optional. Set a token from `HF Token...` in the app if you want authenticated downloads and higher rate limits. A `Read` token is enough.
+*   **`Warning: You are sending unauthenticated requests to the HF Hub`**: Optional. Set a token under **Hugging Face access** on the Model page if you want authenticated downloads and higher rate limits. A `Read` token is enough.
 *   **Multilingual V3 settings appear ignored:** Rebuild the environment after changing dependency sources or deleting `.venv`. Older installed `chatterbox-tts` builds can fall back to the package default multilingual loader and ignore explicit V3 T3 selection.
 </details>
 
