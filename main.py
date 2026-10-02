@@ -145,6 +145,7 @@ import voxcpm_engine
 import omnivoice_engine
 import vibevoice_engine
 import model_tiles
+import voice_library
 import math
 import gc
 import time
@@ -1385,6 +1386,92 @@ class ModelEntryDialog(QDialog):
         self.accept()
 
 
+class VoiceDetailsDialog(QDialog):
+    """Name, tags and notes for a library voice (and the transcript of a clip)."""
+
+    def __init__(self, title, voice, library, transcript=None, offer_clip=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(480)
+        self.voice = voice
+        self.library = library
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.name_input = QLineEdit(voice.name)
+        form.addRow("Name", self.name_input)
+        self.tags_input = QLineEdit(", ".join(voice.tags))
+        self.tags_input.setPlaceholderText("Optional, e.g. narrator, warm, project name")
+        form.addRow("Tags", self.tags_input)
+        self.notes_input = QLineEdit(voice.notes)
+        self.notes_input.setPlaceholderText("Optional")
+        form.addRow("Notes", self.notes_input)
+        self.transcript_input = None
+        if transcript is not None:
+            self.transcript_input = QLineEdit(transcript)
+            self.transcript_input.setPlaceholderText("What is said in the clip (needed by some cloning models)")
+            form.addRow("Transcript", self.transcript_input)
+        layout.addLayout(form)
+        self.clip_checkbox = None
+        if offer_clip:
+            self.clip_checkbox = QCheckBox("Also make a clip of this voice reading a short passage")
+            self.clip_checkbox.setChecked(True)
+            self.clip_checkbox.setToolTip(
+                "Generates about 15 seconds with this voice and keeps it with its exact transcript, "
+                "so every cloning model (Chatterbox, Qwen, VoxCPM, OmniVoice, VibeVoice) can use "
+                "the same voice.")
+            layout.addWidget(self.clip_checkbox)
+        self.error_label = QLabel()
+        self.error_label.setStyleSheet("color: #d9534f;")
+        self.error_label.setVisible(False)
+        layout.addWidget(self.error_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        name = self.name_input.text().strip()
+        if not name:
+            self.error_label.setText("Give the voice a name.")
+        elif any(other.name.lower() == name.lower() for other in self.library.voices if other is not self.voice):
+            self.error_label.setText("Another voice already has this name.")
+        else:
+            self.accept()
+            return
+        self.error_label.setVisible(True)
+
+    def apply(self):
+        self.voice.name = self.name_input.text().strip()
+        self.voice.tags = [tag.strip() for tag in self.tags_input.text().split(",") if tag.strip()]
+        self.voice.notes = self.notes_input.text().strip()
+        return self.transcript_input.text().strip() if self.transcript_input is not None else None
+
+    def make_clip(self):
+        return bool(self.clip_checkbox and self.clip_checkbox.isChecked())
+
+
+class MakeClipThread(QThread):
+    """Generates a reference clip with the current voice: a phonetically rich passage, so
+    the clip comes with an exact transcript."""
+
+    finished_with = Signal(object, int, str)  # waveform (numpy) or None, sample rate, error
+
+    def __init__(self, model, text, language_id, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.text = text
+        self.language_id = language_id
+
+    def run(self):
+        try:
+            wav = self.model.generate(self.text, language_id=self.language_id)
+            data = wav.squeeze(0).detach().cpu().numpy() if hasattr(wav, "detach") else np.asarray(wav)
+            self.finished_with.emit(np.asarray(data, dtype=np.float32).reshape(-1), int(self.model.sr), "")
+        except Exception as exc:
+            self.finished_with.emit(None, 0, str(exc))
+
+
 class CastDialog(QDialog):
     """Pick a voice for each speaker in a conversation script."""
 
@@ -1396,8 +1483,8 @@ class CastDialog(QDialog):
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         intro = QLabel("Choose a voice for each speaker in the script. Sample voices come with "
-                       "VibeVoice; your recordings and any clip work too. Only clone voices of "
-                       "people who have agreed to it.")
+                       "VibeVoice; clip voices from your library and any clip work too. Only clone "
+                       "voices of people who have agreed to it.")
         intro.setObjectName("Muted")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -1411,8 +1498,8 @@ class CastDialog(QDialog):
                 combo.addItem(f"{name}  (sample)", path)
             if recordings:
                 combo.insertSeparator(combo.count())
-                for path in recordings:
-                    combo.addItem(os.path.basename(path), path)
+                for label, path in recordings:
+                    combo.addItem(label, path)
             combo.insertSeparator(combo.count())
             combo.addItem("Other clip\u2026", self.BROWSE)
             current = cast.get(speaker)
@@ -1494,6 +1581,9 @@ class ChatterboxApp(QMainWindow):
         self.last_reference_audio_dir = self.script_dir
         self.recordings_directory = os.path.join(
             self.script_dir, REFERENCE_RECORDINGS_DIRNAME)
+        self.voice_library = voice_library.VoiceLibrary(self.script_dir, self.recordings_directory)
+        self.active_voice_id = None
+        self.pending_voice = None
         self.media_devices = QMediaDevices(self)
         self.recording_format = None
         self.recording_buffer = bytearray()
@@ -1984,15 +2074,16 @@ class ChatterboxApp(QMainWindow):
 
         # ---------- Voice page ----------
         voice_page, voice_layout = self._make_page(
-            "Voice", "Use the default voice, record your own, or pick an audio file.")
+            "Voice", "Your voice library: recordings, clips, presets and designed voices.")
 
         current_card, current_layout = self._make_card("Current voice")
         current_row = QHBoxLayout()
         self.ref_audio_path_label = QLabel("None selected.")
         self.ref_audio_path_label.setWordWrap(False)
         self.ref_audio_path_label.setTextFormat(Qt.TextFormat.PlainText)
+        # Long file names are clipped (full path in the tooltip) instead of widening the window.
         self.ref_audio_path_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         current_row.addWidget(self.ref_audio_path_label, 1)
         self.preview_reference_button = QPushButton("Preview")
         self.preview_reference_button.clicked.connect(self.toggle_reference_preview)
@@ -2000,58 +2091,64 @@ class ChatterboxApp(QMainWindow):
         self.clear_reference_button = QPushButton("Use default voice")
         self.clear_reference_button.clicked.connect(self.clear_reference_audio)
         current_row.addWidget(self.clear_reference_button)
+        save_current_button = QPushButton("Save to library...")
+        save_current_button.setToolTip("Save the voice you're using: a clip, a preset or a designed voice.")
+        save_current_button.clicked.connect(self.save_current_voice)
+        current_row.addWidget(save_current_button)
         current_layout.addLayout(current_row)
         voice_layout.addWidget(current_card)
 
-        record_card, record_layout = self._make_card("Record a new reference")
-        record_hint = QLabel(
-            "Read about 15 seconds in a quiet room; the first few seconds matter most.")
-        record_hint.setObjectName("Muted")
-        record_layout.addWidget(record_hint)
-        record_row = QHBoxLayout()
-        record_row.addWidget(QLabel("Microphone"))
+        library_card, library_layout = self._make_card()
+        library_header = QHBoxLayout()
+        self.voice_filter_tabs = QTabBar()
+        self.voice_filter_tabs.setObjectName("CapabilityTabs")
+        self.voice_filter_tabs.setDrawBase(False)
+        self.voice_filter_tabs.setExpanding(False)
+        self.voice_filter_tabs.setUsesScrollButtons(False)
+        self.voice_filter_tabs.setCursor(Qt.CursorShape.PointingHandCursor)
+        for key, title in (("", "All"), ("clip", "Clips"), ("preset", "Presets"), ("design", "Designed")):
+            self.voice_filter_tabs.setTabData(self.voice_filter_tabs.addTab(title), key)
+        self.voice_filter_tabs.currentChanged.connect(lambda _index: self.render_voice_tiles())
+        library_header.addWidget(self.voice_filter_tabs)
+        library_header.addStretch(1)
+        self.voice_search = QLineEdit()
+        self.voice_search.setPlaceholderText("Search voices")
+        self.voice_search.setToolTip("Matches names, tags and notes.")
+        self.voice_search.setClearButtonEnabled(True)
+        self.voice_search.setFixedWidth(170)
+        self.voice_search.textChanged.connect(lambda _text: self.render_voice_tiles())
+        library_header.addWidget(self.voice_search)
+        library_layout.addLayout(library_header)
+        library_hint = QLabel("Click a voice to use it. Clip voices work with every cloning model; "
+                              "presets and designed voices load their model.")
+        library_hint.setObjectName("Muted")
+        library_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        library_layout.addWidget(library_hint)
+        self.voice_tiles = model_tiles.TileArea(min_rows=1)
+        library_layout.addWidget(self.voice_tiles, 1)
+        library_actions = QHBoxLayout()
         self.mic_combo = QComboBox()
-        self.mic_combo.setToolTip("Microphone used for recording a reference clip.")
-        self.mic_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents)
-        record_row.addWidget(self.mic_combo, 1)
+        self.mic_combo.setToolTip("Microphone used for Record...")
+        self.mic_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.mic_combo.setMinimumContentsLength(10)
+        library_actions.addWidget(self.mic_combo, 1)
         self.record_button = self._accent(QPushButton("Record..."))
         self.record_button.setToolTip(
-            "Record a reference clip from the selected microphone "
-            f"({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s).")
+            "Record a new clip voice: read about 15 seconds in a quiet room; the first few seconds "
+            f"matter most ({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s).")
         self.record_button.clicked.connect(self.open_recording_dialog)
-        record_row.addWidget(self.record_button)
-        record_layout.addLayout(record_row)
+        library_actions.addWidget(self.record_button)
         self.media_devices.audioInputsChanged.connect(self.populate_microphones)
         self.populate_microphones()
-        voice_layout.addWidget(record_card)
-
-        saved_card, saved_layout = self._make_card("Saved recordings and files")
-        self.recordings_listwidget = QListWidget()
-        self.recordings_listwidget.setToolTip("Double-click a recording to use it.")
-        self.recordings_listwidget.itemDoubleClicked.connect(
-            lambda _item: self.use_selected_recording())
-        self.recordings_listwidget.currentRowChanged.connect(
-            lambda _row: self.update_recording_buttons())
-        self.recordings_listwidget.setMinimumHeight(90)
-        self.recordings_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        saved_layout.addWidget(self.recordings_listwidget, 1)
-        saved_actions = QHBoxLayout()
-        self.use_recording_button = QPushButton("Use selected")
-        self.use_recording_button.clicked.connect(self.use_selected_recording)
-        saved_actions.addWidget(self.use_recording_button)
-        self.preview_recording_button = QPushButton("Preview selected")
-        self.preview_recording_button.clicked.connect(self.preview_selected_recording)
-        saved_actions.addWidget(self.preview_recording_button)
-        saved_actions.addStretch(1)
-        open_recordings_button = QPushButton("Open folder")
-        open_recordings_button.clicked.connect(self.open_recordings_folder)
-        saved_actions.addWidget(open_recordings_button)
-        browse_ref_button = QPushButton("Browse for a file...")
+        browse_ref_button = QPushButton("Add a file...")
+        browse_ref_button.setToolTip("Add a .wav, .mp3 or .flac clip to the library and use it.")
         browse_ref_button.clicked.connect(self.browse_reference_audio)
-        saved_actions.addWidget(browse_ref_button)
-        saved_layout.addLayout(saved_actions)
-        voice_layout.addWidget(saved_card, 1)
+        library_actions.addWidget(browse_ref_button)
+        open_recordings_button = self._link(QPushButton("Open folder"))
+        open_recordings_button.clicked.connect(self.open_recordings_folder)
+        library_actions.addWidget(open_recordings_button)
+        library_layout.addLayout(library_actions)
+        voice_layout.addWidget(library_card, 1)
         self.pages.addWidget(voice_page)
 
         # ---------- Model page ----------
@@ -2715,8 +2812,12 @@ class ChatterboxApp(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Reference Audio", default_dir, "Audio Files (*.wav *.mp3 *.flac)")
         if file_path:
+            voice = self.voice_library.add_clip(file_path)
+            self.active_voice_id = voice.id
             self.set_reference_audio(file_path)
             self.last_reference_audio_dir = os.path.dirname(file_path)
+            self.render_voice_tiles()
+            self.set_status_message(f"Status: Added {voice.name} to the voice library and selected it.")
 
     # --- Engine-specific controls ---
 
@@ -2832,7 +2933,8 @@ class ChatterboxApp(QMainWindow):
         elif qwen is not None and qwen.mode == "voice_design":
             text, tip = "Designed voice", "Described in the Delivery card below."
         elif reference:
-            text, tip = os.path.basename(reference), reference
+            saved = self.voice_library.find_clip(reference)
+            text, tip = (saved.name if saved else os.path.basename(reference)), reference
         else:
             text = "Default voice"
             tip = "The model's built-in voice. Pick a reference clip on the Voice page to clone a voice."
@@ -2908,8 +3010,11 @@ class ChatterboxApp(QMainWindow):
             return
         speakers = self.script_speakers()
         cast = self.current_cast(speakers)
-        parts = [f"{speaker} \u2192 {vibevoice_engine.voice_name(cast[speaker], model.sample_paths)}"
-                 for speaker in speakers if speaker in cast]
+        def cast_name(path):
+            voice = self.voice_library.find_clip(path)
+            return voice.name if voice else vibevoice_engine.voice_name(path, model.sample_paths)
+
+        parts = [f"{speaker} \u2192 {cast_name(cast[speaker])}" for speaker in speakers if speaker in cast]
         text = " \u00b7 ".join(parts) if parts else "Write lines like \u201cLinda: Hello.\u201d"
         if len(speakers) > vibevoice_engine.MAX_SPEAKERS:
             text = f"{len(speakers)} speakers: VibeVoice handles up to {vibevoice_engine.MAX_SPEAKERS}"
@@ -2926,14 +3031,11 @@ class ChatterboxApp(QMainWindow):
             QMessageBox.information(self, "Cast", "Write the script first, one speaker per line, e.g.\n\n"
                                     + vibevoice_engine.SCRIPT_HINT.split("\n", 1)[1])
             return
-        recordings = []
-        if os.path.isdir(self.recordings_directory):
-            recordings = sorted((os.path.join(self.recordings_directory, name)
-                                 for name in os.listdir(self.recordings_directory)
-                                 if name.lower().endswith(".wav")), key=os.path.getmtime, reverse=True)
+        self.voice_library.import_recordings()
+        recordings = [(voice.name, self.voice_library.clip_path(voice)) for voice in self.voice_library.clip_voices()]
         reference = self.ref_audio_path_label.toolTip()
-        if reference and reference not in recordings:
-            recordings.insert(0, reference)
+        if reference and reference not in {path for _name, path in recordings}:
+            recordings.insert(0, (os.path.basename(reference), reference))
         dialog = CastDialog(speakers, self.current_cast(speakers), model.sample_paths, recordings, self)
         if dialog_accepted(dialog.exec()):
             chosen = dict(self.vibevoice_settings.get("cast", {}))
@@ -3035,7 +3137,8 @@ class ChatterboxApp(QMainWindow):
 
     def set_reference_audio(self, path):
         if path:
-            name = os.path.basename(path)
+            saved = self.voice_library.find_clip(path) if hasattr(self, "voice_library") else None
+            name = saved.name if saved else os.path.basename(path)
             self.ref_audio_path_label.setText(name)
             self.ref_audio_path_label.setToolTip(path)
             self.voice_chip.setText(name)
@@ -3050,6 +3153,7 @@ class ChatterboxApp(QMainWindow):
         if hasattr(self, "qwen_transcript_input"):
             self.load_reference_transcript(path)
             self.refresh_voice_chip()
+        self.render_voice_tiles()
 
     def clear_reference_audio(self):
         self.stop_reference_preview()
@@ -3057,43 +3161,9 @@ class ChatterboxApp(QMainWindow):
         self.set_status_message("Status: Using the default voice.")
 
     def refresh_recordings_list(self):
-        self.recordings_listwidget.clear()
-        paths = []
-        if os.path.isdir(self.recordings_directory):
-            paths = [os.path.join(self.recordings_directory, name)
-                     for name in os.listdir(self.recordings_directory)
-                     if name.lower().endswith(".wav")]
-        for path in sorted(paths, key=os.path.getmtime, reverse=True):
-            try:
-                with wave.open(path, "rb") as wav_file:
-                    seconds = wav_file.getnframes() / float(wav_file.getframerate())
-                length = f"{seconds:.0f} s"
-            except Exception:
-                length = "unreadable"
-            when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%b %d, %I:%M %p")
-            item = QListWidgetItem(f"{os.path.basename(path)}    {length}  ·  {when}")
-            item.setData(Qt.ItemDataRole.UserRole, path)
-            self.recordings_listwidget.addItem(item)
-        if not paths:
-            placeholder = QListWidgetItem("No recordings yet. Use Record... above to make one.")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.recordings_listwidget.addItem(placeholder)
-        self.update_recording_buttons()
-
-    def selected_recording_path(self):
-        item = self.recordings_listwidget.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
-
-    def update_recording_buttons(self):
-        has_selection = bool(self.selected_recording_path())
-        self.use_recording_button.setEnabled(has_selection)
-        self.preview_recording_button.setEnabled(has_selection)
-
-    def use_selected_recording(self):
-        path = self.selected_recording_path()
-        if path:
-            self.set_reference_audio(path)
-            self.set_status_message(f"Status: Voice set to {os.path.basename(path)}.")
+        """Bring new recordings into the library and redraw it."""
+        self.voice_library.import_recordings()
+        self.render_voice_tiles()
 
     def _start_reference_preview(self, path, button):
         self.stop_reference_preview()
@@ -3108,7 +3178,6 @@ class ChatterboxApp(QMainWindow):
     def _on_preview_state_changed(self, state):
         if state == QMediaPlayer.PlaybackState.StoppedState and self.preview_button_playing:
             self.preview_reference_button.setText("Preview")
-            self.preview_recording_button.setText("Preview selected")
             self.preview_button_playing = None
 
     def toggle_reference_preview(self):
@@ -3119,17 +3188,305 @@ class ChatterboxApp(QMainWindow):
         if path:
             self._start_reference_preview(path, self.preview_reference_button)
 
-    def preview_selected_recording(self):
-        if self.preview_button_playing is self.preview_recording_button:
-            self.stop_reference_preview()
-            return
-        path = self.selected_recording_path()
-        if path:
-            self._start_reference_preview(path, self.preview_recording_button)
 
     def open_recordings_folder(self):
         os.makedirs(self.recordings_directory, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.recordings_directory))
+
+    # --- Voice library ---
+
+    def voice_is_active(self, voice):
+        if voice.kind == "clip":
+            path = self.voice_library.clip_path(voice)
+            return bool(path) and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                os.path.abspath(self.ref_audio_path_label.toolTip() or "~none~"))
+        model = self.active_qwen_model()
+        return (voice.id == self.active_voice_id and model is not None
+                and getattr(model, "backend", "") == voice.backend)
+
+    def render_voice_tiles(self):
+        if not hasattr(self, "voice_tiles"):
+            return
+        kind = self.voice_filter_tabs.tabData(self.voice_filter_tabs.currentIndex())
+        query = self.voice_search.text().strip().lower()
+        voices = [voice for voice in self.voice_library.voices
+                  if (not kind or voice.kind == kind or (kind == "clip" and voice.has_clip))
+                  and (not query or query in " ".join([voice.name, voice.notes, *voice.tags]).lower())]
+        voices.sort(key=lambda voice: voice.created, reverse=True)
+        counts = {key: sum(1 for voice in self.voice_library.voices
+                           if not key or voice.kind == key or (key == "clip" and voice.has_clip))
+                  for key in ("", "clip", "preset", "design")}
+        for index in range(self.voice_filter_tabs.count()):
+            key = self.voice_filter_tabs.tabData(index)
+            title = {"": "All", "clip": "Clips", "preset": "Presets", "design": "Designed"}[key]
+            self.voice_filter_tabs.setTabText(index, f"{title}  {counts[key]}" if counts[key] else title)
+        empty = ("No voices match." if query or kind else
+                 "No voices yet. Record one, add a file, or save the voice you're using.")
+        self.voice_tiles.set_tiles([self.voice_tile(voice) for voice in voices], empty)
+
+    def voice_tile(self, voice):
+        library = self.voice_library
+        active = self.voice_is_active(voice)
+        engine = model_registry.ENGINES.get(voice.backend)
+        path = library.clip_path(voice)
+        if voice.kind == "clip":
+            exists = os.path.exists(path)
+            seconds = voice_library.clip_seconds(path) if exists else 0
+            subtitle = f"Clip \u00b7 {seconds:.0f} s" if exists else "Clip \u00b7 file missing"
+            transcript = voice_library.read_transcript(path) if exists else ""
+            detail = f"\u201c{transcript}\u201d" if transcript else "No transcript"
+        elif voice.kind == "preset":
+            label = kokoro_engine.voice_label(voice.speaker) if voice.backend == KOKORO_BACKEND \
+                else voice.speaker.replace("_", " ").title()
+            subtitle = f"Preset \u00b7 {engine.label if engine else voice.backend} \u00b7 {label}"
+            detail = voice.style or voice.notes or "Built-in voice"
+        else:
+            subtitle = f"Designed \u00b7 {engine.label if engine else voice.backend}"
+            detail = voice.description
+        badges = [("active", "In use", "This is the voice you're using.")] if active else []
+        if voice.kind != "clip" and voice.has_clip:
+            badges.append(("status", "Has clip", "Also usable as a clip voice by cloning models."))
+        badges += [("status", tag, "Tag") for tag in voice.tags[:2]]
+        tooltip = "\n".join(line for line in (voice.name, subtitle, detail if voice.kind != "clip" else "",
+                                               voice.notes, path, "Click to use. Right-click for more.") if line)
+        tile = model_tiles.ModelTile(voice.name, subtitle, badges, detail, tooltip, active=active, with_menu=True)
+        tile.clicked.connect(lambda v=voice: self.use_voice(v))
+        tile.menu_requested.connect(lambda pos, v=voice: self.show_voice_menu(v, pos))
+        return tile
+
+    def show_voice_menu(self, voice, pos):
+        menu = QMenu(self)
+        path = self.voice_library.clip_path(voice)
+        playing = self.preview_button_playing is self.voice_tiles and getattr(self, "previewing_voice", None) is voice
+        entries = [
+            ("Use", lambda: self.use_voice(voice), True),
+            ("Stop preview" if playing else "Preview clip", lambda: self.preview_voice(voice),
+             bool(path) and os.path.exists(path)),
+        ]
+        if voice.kind != "clip":
+            entries.append(("Use as a clip voice", lambda: self.use_voice(voice, as_clip=True),
+                            bool(path) and os.path.exists(path)))
+            entries.append(("Make clip..." if not voice.has_clip else "Remake clip...",
+                            lambda: self.make_voice_clip(voice), not self.model_busy()))
+        entries += [None, ("Edit...", lambda: self.edit_voice(voice), True),
+                    ("Show file in folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path))),
+                     bool(path) and os.path.exists(path)),
+                    None, ("Remove from library...", lambda: self.remove_voice(voice), True)]
+        for item in entries:
+            if item is None:
+                menu.addSeparator()
+                continue
+            text, callback, enabled = item
+            action = menu.addAction(text)
+            action.setEnabled(enabled)
+            action.triggered.connect(lambda _checked=False, callback=callback: callback())
+        menu.exec(pos)
+
+    def preview_voice(self, voice):
+        if self.preview_button_playing is self.voice_tiles and getattr(self, "previewing_voice", None) is voice:
+            self.stop_reference_preview()
+            return
+        self.stop_reference_preview()
+        self.previewing_voice = voice
+        self.preview_button_playing = self.voice_tiles
+        self.preview_player.setSource(QUrl.fromLocalFile(self.voice_library.clip_path(voice)))
+        self.preview_player.play()
+
+    def entry_for_voice(self, voice):
+        for entry in self.model_entries:
+            if entry.get("backend") != voice.backend or entry.get("repo_id") != voice.repo_id:
+                continue
+            if voice.backend in DUAL_MODE_BACKENDS and model_registry.entry_mode(entry) != (voice.mode or "design"):
+                continue
+            return entry
+        return None
+
+    def use_voice(self, voice, as_clip=False):
+        path = self.voice_library.clip_path(voice)
+        if voice.kind == "clip" or as_clip:
+            if not os.path.exists(path):
+                QMessageBox.warning(self, "Voice", f"The clip for {voice.name} is missing:\n{path}")
+                return
+            self.set_reference_audio(path)
+            self.active_voice_id = voice.id
+            model = self.active_qwen_model()
+            note = ""
+            if model is not None and model.mode not in ("base",):
+                note = " It's used by cloning models; the loaded model doesn't clone."
+            self.set_status_message(f"Status: Voice set to {voice.name}.{note}")
+            self.render_voice_tiles()
+            return
+        entry = self.entry_for_voice(voice)
+        if entry is None:
+            engine = model_registry.ENGINES.get(voice.backend)
+            QMessageBox.information(
+                self, "Voice", f"{voice.name} needs {engine.label if engine else voice.backend} "
+                f"({voice.repo_id}), which isn't in your model list. Add it on the Model page first.")
+            return
+        if self.model_busy():
+            self.set_status_message("Status: Wait for the current load or generation to finish.")
+            return
+        self.pending_voice = voice
+        if self.is_active_entry(entry):
+            self.apply_pending_voice()
+        else:
+            self.set_status_message(f"Status: Loading {entry['label']} for {voice.name}...")
+            self.load_entry(entry)
+
+    def apply_pending_voice(self):
+        voice, self.pending_voice = self.pending_voice, None
+        model = self.active_qwen_model()
+        if voice is None or model is None or getattr(model, "backend", "") != voice.backend:
+            return
+        if voice.language:
+            index = self.language_combo.findData(voice.language)
+            if index >= 0:
+                self.language_combo.setCurrentIndex(index)
+        if voice.kind == "preset":
+            if isinstance(model, kokoro_engine.KokoroModel):
+                language = voice.language or kokoro_engine.voice_language(voice.speaker) or "en"
+                self.kokoro_settings.setdefault("voice_by_language", {})[language] = voice.speaker
+            else:
+                self.qwen_settings.update(speaker=voice.speaker, style=voice.style)
+        else:
+            self.engine_settings(model)["description"] = voice.description
+        self.update_engine_controls()
+        if voice.kind == "preset":
+            index = self.qwen_speaker_combo.findData(voice.speaker)
+            if index >= 0:
+                self.qwen_speaker_combo.setCurrentIndex(index)
+        self.active_voice_id = voice.id
+        self.set_status_message(f"Status: Voice set to {voice.name}.")
+        self.refresh_voice_chip()
+        self.render_voice_tiles()
+
+    def current_voice_spec(self):
+        """(Voice, error): the voice in use, as an unsaved library voice."""
+        model = self.active_qwen_model()
+        entry = self.loaded_entry()
+        language = self.language_combo.currentData() or ""
+        if model is not None and model.mode == "conversation":
+            return None, ("A conversation uses a cast of voices. Save each speaker's voice as a clip "
+                          "voice instead (record it, or add the file), then pick it in Cast\u2026.")
+        if model is not None and entry is not None and model.mode in ("custom_voice", "preset"):
+            speaker = self.qwen_speaker_combo.currentData() or ""
+            style = self.qwen_instruct_input.text().strip() if model.mode == "custom_voice" else ""
+            name = self.qwen_speaker_combo.currentText().split(" (")[0]
+            return voice_library.Voice(name=name, kind="preset", backend=entry["backend"], repo_id=entry["repo_id"],
+                                       speaker=speaker, style=style, language=language), None
+        if model is not None and entry is not None and model.mode == "voice_design":
+            description = self.qwen_instruct_input.text().strip()
+            if not description:
+                return None, "Describe the voice first (Voice description, in the Delivery card)."
+            return voice_library.Voice(name="Designed voice", kind="design", backend=entry["backend"],
+                                       repo_id=entry["repo_id"], mode=model_registry.entry_mode(entry)
+                                       if entry["backend"] in DUAL_MODE_BACKENDS else "",
+                                       description=description, language=language), None
+        path = self.ref_audio_path_label.toolTip()
+        if not path:
+            return None, "You're using the model's default voice. Record a clip or add a file to save a voice."
+        existing = self.voice_library.find_clip(path)
+        if existing:
+            return existing, None
+        return voice_library.Voice(name=os.path.splitext(os.path.basename(path))[0], kind="clip",
+                                   clip=self.voice_library.to_stored(path)), None
+
+    def save_current_voice(self):
+        voice, problem = self.current_voice_spec()
+        if problem:
+            QMessageBox.information(self, "Save Voice", problem)
+            return
+        if voice in self.voice_library.voices:
+            self.edit_voice(voice)
+            return
+        transcript = None
+        if voice.kind == "clip":
+            transcript = voice_library.read_transcript(self.voice_library.clip_path(voice))
+        dialog = VoiceDetailsDialog("Save voice", voice, self.voice_library, transcript,
+                                    offer_clip=voice.kind != "clip", parent=self)
+        if not dialog_accepted(dialog.exec()):
+            return
+        transcript = dialog.apply()
+        self.voice_library.add(voice)
+        if transcript is not None:
+            voice_library.write_transcript(self.voice_library.clip_path(voice), transcript)
+            self.load_reference_transcript(self.voice_library.clip_path(voice))
+        self.active_voice_id = voice.id
+        self.set_status_message(f"Status: Saved {voice.name} to the voice library.")
+        self.render_voice_tiles()
+        if dialog.make_clip():
+            self.make_voice_clip(voice)
+
+    def edit_voice(self, voice):
+        path = self.voice_library.clip_path(voice)
+        transcript = voice_library.read_transcript(path) if path and os.path.exists(path) else None
+        dialog = VoiceDetailsDialog("Edit voice", voice, self.voice_library, transcript, parent=self)
+        if not dialog_accepted(dialog.exec()):
+            return
+        transcript = dialog.apply()
+        if transcript is not None:
+            voice_library.write_transcript(path, transcript)
+            if self.voice_is_active(voice):
+                self.load_reference_transcript(path)
+        self.voice_library.save()
+        self.render_voice_tiles()
+
+    def remove_voice(self, voice):
+        path = self.voice_library.clip_path(voice)
+        owned = bool(path) and os.path.abspath(path).startswith(os.path.abspath(self.voice_library.clips_dir))
+        detail = ("Its clip, made by the library, is deleted too." if owned else
+                  "The audio file stays where it is." if path else "")
+        answer = QMessageBox.question(self, "Remove Voice", f"Remove {voice.name} from the library?\n\n{detail}")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if self.preview_button_playing is self.voice_tiles:
+            self.stop_reference_preview()
+        if owned and self.voice_is_active(voice):
+            self.set_reference_audio(None)
+        self.voice_library.remove(voice)
+        self.render_voice_tiles()
+
+    def make_voice_clip(self, voice):
+        """Generate a clip of a preset or designed voice reading a passage, so cloning
+        models can use it. The voice has to be the one in use (it is loaded first)."""
+        if not self.voice_is_active(voice):
+            self.use_voice(voice)
+            if not self.voice_is_active(voice):
+                self.pending_clip_voice = voice  # made once the model has loaded
+                return
+        problem = self.prepare_qwen_generation()
+        if problem:
+            QMessageBox.information(self, "Make Clip", problem)
+            return
+        language = self.language_combo.currentData() or "en"
+        passage = REFERENCE_READING_SCRIPTS[0]
+        self.set_status_message(f"Status: Making a clip of {voice.name}...")
+        self.generate_button.setEnabled(False)
+        self.clip_thread = MakeClipThread(self.model, passage, language, self)
+        self.clip_thread.finished_with.connect(
+            lambda wav, sr, error, v=voice, text=passage: self.on_voice_clip_made(v, text, wav, sr, error))
+        self.clip_thread.start()
+
+    def on_voice_clip_made(self, voice, text, wav, sr, error):
+        self.generate_button.setEnabled(self.model is not None)
+        if error or wav is None:
+            self.set_status_message("Status: Could not make the clip. See the Log page.")
+            QMessageBox.warning(self, "Make Clip", f"Could not make the clip:\n{error}")
+            return
+        old = self.voice_library.clip_path(voice)
+        path = self.voice_library.new_clip_path(voice.name)
+        import soundfile
+        soundfile.write(path, np.clip(wav, -1.0, 1.0), sr, subtype="PCM_16")
+        voice_library.write_transcript(path, text)
+        voice.clip = self.voice_library.to_stored(path)
+        self.voice_library.save()
+        if old and old != path and old.startswith(os.path.abspath(self.voice_library.clips_dir)):
+            for target in (old, voice_library.transcript_path(old)):
+                if os.path.exists(target):
+                    os.remove(target)
+        self.set_status_message(f"Status: Made a {len(wav) / sr:.0f} s clip of {voice.name}. "
+                                "Cloning models can use it now.")
+        self.render_voice_tiles()
 
     # --- Reference audio recording ---
 
@@ -3199,6 +3556,8 @@ class ChatterboxApp(QMainWindow):
         if script:
             with open(self.transcript_path(output_path), "w", encoding="utf-8") as handle:
                 handle.write(script + "\n")
+        self.voice_library.import_recordings()
+        self.active_voice_id = getattr(self.voice_library.find_clip(output_path), "id", None)
         self.set_reference_audio(output_path)
         self.refresh_recordings_list()
         self.last_reference_audio_dir = self.recordings_directory
@@ -3838,6 +4197,17 @@ class ChatterboxApp(QMainWindow):
         self.refresh_language_options()
         self.update_text_stats()
         self.render_model_tiles()
+        self.after_voice_model_ready()
+
+    def after_voice_model_ready(self):
+        if self.pending_voice is not None:
+            self.apply_pending_voice()
+        clip_voice = getattr(self, "pending_clip_voice", None)
+        if clip_voice is not None:
+            self.pending_clip_voice = None
+            if self.voice_is_active(clip_voice):
+                self.make_voice_clip(clip_voice)
+        self.render_voice_tiles()
 
     def on_model_loaded(self, model_instance, device_used):
         self.model_is_warm = False
@@ -3856,6 +4226,7 @@ class ChatterboxApp(QMainWindow):
         self.update_text_stats()
         self.refresh_models_page()
         self.update_engine_controls()
+        self.after_voice_model_ready()
         if self.system_has_nvidia_gpu and self.device_used == "cpu":
             details = self.cuda_runtime_issue or (
                 "This Python environment is using a CPU-only PyTorch build."

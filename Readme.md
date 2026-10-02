@@ -95,15 +95,23 @@ Windows remains the primary maintained path.
 
 ### Voice
 
-*   **Current voice**, with **Preview** and **Use default voice**.
-*   **Record...** opens a guided recording window:
+*   **Current voice**, with **Preview**, **Use default voice** and **Save to library...**.
+*   **Voice library:** every voice you've saved, as tiles you click to use. Filter by **Clips**, **Presets** or **Designed**, or search by name, tag or notes. There are three kinds:
+    *   **Clip voices:** a recording or audio file and its transcript. They work with every cloning model: Chatterbox, Qwen, VoxCPM, OmniVoice, and as VibeVoice cast members.
+    *   **Preset voices:** a Kokoro voice, or a Qwen speaker and style.
+    *   **Designed voices:** a Qwen or VoxCPM description, or OmniVoice attributes.
+
+    Using a preset or designed voice loads its model and fills in its settings.
+*   **Save to library...** saves the voice you're using: a clip, a preset, or a designed voice. For presets and designed voices, it can also **make a clip**: about 15 s of that voice reading a phonetic passage, saved with its exact transcript. Cloning models can then reuse a voice you designed once, so the same character works across engines.
+*   **Right-click or ⋯ on a voice** for **Preview clip**, **Use as a clip voice**, **Make clip...**, **Edit...** (name, tags, notes, transcript), **Show file in folder** and **Remove from library...**. Removing a recording only takes it out of the library; the file stays. Clips the library made are deleted with their voice.
+*   **Record...** (with the microphone picker) opens a guided recording window:
     *   A 3-second countdown. The level meter works during the countdown as a mic check.
     *   An elapsed/maximum timer and a scrolling level graph.
     *   "Good level", "Too quiet" and "Too loud – clipping" hints.
     *   **Stop & Use** is available after 3 seconds, and recording stops automatically at 30 seconds.
     *   **Read-aloud passages** cover every English vowel and consonant sound and include a question and an exclamation for inflection.
-    *   Recordings are saved to `reference_recordings/` together with the passage that was read. Qwen voice cloning uses that text as the clip transcript.
-*   **Saved recordings and files**, each showing its length and date. Use or preview any of them, or browse for a `.wav`, `.mp3` or `.flac`.
+    *   Recordings are saved to `reference_recordings/` together with the passage that was read, which cloning models use as the clip transcript. New recordings join the library automatically.
+*   **Add a file...** adds a `.wav`, `.mp3` or `.flac` clip to the library and uses it. The file stays where it is.
 
 ### Model
 
@@ -242,7 +250,7 @@ Windows remains the primary maintained path.
     *   Type or paste text, or click **Open document...**.
     *   Optionally click **Preview** to hear a sample, then **Keep this take** if you like it.
     *   Click **Generate Audio**. Results are saved to `chatterbox_outputs/` and listed under the player.
-4.  **Clone a voice:** on the **Voice** page, pick a microphone and click **Record...**, or **Browse for a file...**. The selected clip is used by the Voice cloning models.
+4.  **Clone a voice:** on the **Voice** page, pick a microphone and click **Record...**, or **Add a file...**. The voice joins your library, and the selected clip is used by the cloning models.
     *   Chatterbox relies mostly on the first 6–10 seconds of a clip, so start speaking right away and keep the room quiet.
 5.  **Try another engine (optional):** pick a Qwen3, VoxCPM2, OmniVoice, VibeVoice or Kokoro model in the model switcher, or click its tile on the Model page. The first time, the app offers to install that engine. Each model downloads the first time you use it.
 6.  **Add more models:** on the **Model** page, click a tile under **Discover**, or use **+ Add repo…** with **Check**.
@@ -298,7 +306,8 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
 *   `install_torch.py`: detects CUDA and installs a matching PyTorch build.
 *   `model_backends.py`: loads Chatterbox models.
 *   `model_registry.py`: engine definitions, capability groups, `models.json` saving, download status, license badges, the Hugging Face **Check**, and model search.
-*   `model_tiles.py`: the Model page tiles, tile grid and background Hugging Face search.
+*   `model_tiles.py`: the tiles and tile grid used by the Model and Voice pages, and the background Hugging Face search.
+*   `voice_library.py`: the voice library: saved clip, preset and designed voices, stored in `voice_library/`.
 *   `engine_worker.py`: shared code for engines with their own environment: installing it, running the worker process and adding the watermark.
 *   `qwen_engine.py` / `engines/qwen/qwen_worker.py`: the Qwen3-TTS engine. The worker runs inside `engines/qwen/.venv`.
 *   `vibevoice_engine.py` / `engines/vibevoice/vibevoice_worker.py`: the VibeVoice engine, its sample voices and casting. The worker runs inside `engines/vibevoice/.venv`.
@@ -316,6 +325,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
     *   `.venv/` and `engines/<name>/.venv/`: the Python environments.
     *   `chatterbox_outputs/`: generated audio.
     *   `reference_recordings/`: your microphone recordings.
+    *   `voice_library/`: the voice library index (`voices.json`) and the clips it makes.
     *   `logs/`: installer and startup logs.
     *   `app_settings.json`: window, delivery and finishing settings, learned speeds, and the Hugging Face token.
 </details>

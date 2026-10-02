@@ -36,7 +36,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
 - **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
 - **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
 - **Advanced page:** speed and pitch changes (formant-preserving) and MP3 export, with a note that they can weaken the AI watermark.
-- **Voice page:** preview the current voice, return to the default voice, and use or preview saved recordings.
+- **Voice library** (the Voice page). Save clip voices, preset voices (Kokoro, Qwen speakers) and designed voices (Qwen, VoxCPM, OmniVoice) by name, with tags and notes, and use any of them with a click. A preset or designed voice can **make a clip**: 15 s reading a phonetic passage with its exact transcript, so cloning models can reuse it. Existing recordings join the library without being moved, and VibeVoice's **Cast…** lists library voices by name.
 
 ### Changed
 - **The shipped model list only holds models you can actually download.** The placeholder "Example custom…" entries and the "Legacy English compatibility" entry are gone; add an original-layout model with **+ Add repo…** if you need one. Each shipped model's download size is shown on its tile before you load it.

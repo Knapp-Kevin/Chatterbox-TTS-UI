@@ -71,3 +71,6 @@ screenshot_*.png
 
 # Microphone recordings made with the in-app Record button
 reference_recordings/
+
+# Voice library: your saved voices and the clips it makes
+voice_library/
