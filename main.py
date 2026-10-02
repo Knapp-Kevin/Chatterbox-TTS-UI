@@ -1120,7 +1120,17 @@ class ChatterboxApp(QMainWindow):
         voice_row.addWidget(self.language_combo)
         generate_layout.addLayout(voice_row)
 
-        text_card, text_card_layout = self._make_card("Text")
+        text_card, text_card_layout = self._make_card()
+        text_header = QHBoxLayout()
+        text_title = QLabel("Text")
+        text_title.setObjectName("CardTitle")
+        text_header.addWidget(text_title)
+        self.document_label = QLabel()
+        self.document_label.setObjectName("Muted")
+        self.document_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.document_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_header.addWidget(self.document_label, 1)
+        text_card_layout.addLayout(text_header)
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText(
             "Enter text to synthesize. Long text is split into segments of "
@@ -1139,11 +1149,17 @@ class ChatterboxApp(QMainWindow):
         self.text_stats_label.setObjectName("Muted")
         self.text_stats_label.setTextFormat(Qt.TextFormat.PlainText)
         self.text_stats_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.text_stats_label.setToolTip(
+            "Updates as you edit. The time estimate is learned from your previous full renders.")
         text_status_row.addWidget(self.text_stats_label, 1)
+        self.activity_label = QLabel()
+        self.activity_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.activity_label.setToolTip("Section being generated / total sections, and time left.")
+        text_status_row.addWidget(self.activity_label)
         self.generation_progress = QProgressBar()
         self.generation_progress.setTextVisible(False)
         self.generation_progress.setFixedHeight(8)
-        self.generation_progress.setFixedWidth(120)
+        self.generation_progress.setFixedWidth(100)
         self.generation_progress.setVisible(False)
         text_status_row.addWidget(self.generation_progress)
         self.keep_take_button = self._link(QPushButton("Keep this take"))
@@ -1686,7 +1702,7 @@ class ChatterboxApp(QMainWindow):
         self.load_model_button.setEnabled(False)
         self.generation_progress.setValue(0)
         self.generation_progress.setVisible(True)
-        self.text_stats_label.setText("Previewing..." if preview else "Starting...")
+        self.activity_label.setText("Previewing..." if preview else "Starting...")
 
         self.generation_start_time = QTime.currentTime()
         self.generation_timer.start(1000)
@@ -1718,8 +1734,7 @@ class ChatterboxApp(QMainWindow):
         if self.last_preview_seed:
             self.seed_input.setValue(self.last_preview_seed)
             self.keep_take_button.setVisible(False)
-            self.text_stats_label.setText(
-                f"Take {self.last_preview_seed} locked; Generate Audio will match the preview.")
+            self.activity_label.setText(f"Take {self.last_preview_seed} locked")
 
     # --- Documents ---
 
@@ -1742,13 +1757,14 @@ class ChatterboxApp(QMainWindow):
         self.app_settings["last_document_dir"] = os.path.dirname(path)
         self.text_input.setPlainText(text)
         self.current_document_name = documents.safe_file_stem(path)
-        self.current_document_label = os.path.basename(path)
+        self.document_label.setText(os.path.basename(path))
         self.update_text_stats()
         self.set_status_message(f"Status: Loaded {os.path.basename(path)}. Try Preview before generating.")
 
     def on_text_changed(self):
         if not self.text_input.toPlainText().strip():
             self.current_document_name = None
+            self.document_label.clear()
         self.text_stats_timer.start()
 
     def seconds_per_char(self):
@@ -1756,20 +1772,18 @@ class ChatterboxApp(QMainWindow):
         return measured or DEFAULT_SECONDS_PER_CHAR.get(self.device_used, 0.35)
 
     def update_text_stats(self):
-        if self.is_generating:
-            return
+        # Always current, including while a preview or render runs; a running
+        # render keeps using the text it started with.
         text = self.text_input.toPlainText().strip()
         if not text:
             self.text_stats_label.setText("Type or paste text, or open a document.")
             return
         sections = len(documents.split_into_sections(text))
         estimate = self.format_duration(len(text) * self.seconds_per_char())
-        parts = []
-        if self.current_document_name:
-            parts.append(getattr(self, "current_document_label", self.current_document_name))
-        parts.append(f"{len(text):,} characters")
-        parts.append(f"{sections} section{'s' if sections != 1 else ''}")
-        parts.append(f"about {estimate} to generate")
+        # Estimate first so it survives truncation in narrow windows.
+        parts = [f"About {estimate}",
+                 f"{sections} section{'s' if sections != 1 else ''}",
+                 f"{len(text):,} characters"]
         self.text_stats_label.setText(" \u00b7 ".join(parts))
 
     @staticmethod
@@ -2285,6 +2299,7 @@ class ChatterboxApp(QMainWindow):
             preset_text = selected_entry.get("test_text")
         if preset_text:
             self.current_document_name = None
+            self.document_label.clear()
             self.text_input.setPlainText(preset_text)
 
     def open_models_config(self):
@@ -2451,7 +2466,8 @@ class ChatterboxApp(QMainWindow):
         self.load_model_button.setEnabled(True)
         self.generation_progress.setVisible(False)
         if not self.keep_take_button.isVisible():
-            self.update_text_stats()
+            self.activity_label.clear()
+        self.update_text_stats()
 
         # Final status update based on how the thread might have ended,
         # if not already set by on_generation_complete or on_generation_error.
@@ -2498,13 +2514,15 @@ class ChatterboxApp(QMainWindow):
         elapsed = time.monotonic() - self.generation_started_at
         self.generation_progress.setMaximum(total_chunks)
         self.generation_progress.setValue(done)
-        label = "Preview" if self.generation_is_preview else "Section"
-        parts = [f"{label} {current_chunk} of {total_chunks}",
-                 f"{self.format_clock(elapsed)} elapsed"]
+        activity = f"{current_chunk}/{total_chunks}"
+        if self.generation_is_preview:
+            activity = f"Preview {activity}"
         if done:
             remaining = elapsed / done * (total_chunks - done)
-            parts.append(f"{self.format_clock(remaining)} left")
-        self.text_stats_label.setText(" \u00b7 ".join(parts))
+            activity += f" \u00b7 {self.format_clock(remaining)} left"
+        else:
+            activity += f" \u00b7 {self.format_clock(elapsed)}"
+        self.activity_label.setText(activity)
         self.set_status_message(f"Status: Generating section {current_chunk}/{total_chunks}...")
 
     def on_generation_complete(self, output_path, sample_rate):
@@ -2521,11 +2539,8 @@ class ChatterboxApp(QMainWindow):
         self.generation_progress.setValue(self.generation_progress.maximum())
         if thread.preview:
             self.last_preview_seed = thread.actual_seed_used
-            if self.seed_input.value() == 0:
-                self.text_stats_label.setText(f"Preview ready (take {self.last_preview_seed}).")
-                self.keep_take_button.setVisible(True)
-            else:
-                self.text_stats_label.setText(f"Preview ready (take {self.last_preview_seed}).")
+            self.activity_label.setText(f"Preview take {self.last_preview_seed}")
+            self.keep_take_button.setVisible(self.seed_input.value() == 0)
             self.set_status_message(f"Status: Preview ready{total_generation_time_str}.")
         elif thread.partial_info:
             done, total = thread.partial_info
