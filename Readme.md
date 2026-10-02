@@ -158,7 +158,8 @@ Windows remains the primary maintained path.
         *   The token is saved locally in `app_settings.json`, which is ignored by git and should not be shared.
     *   **Enter Text:** Type or paste the text you want to synthesize. Long texts will be automatically chunked and stitched.
     *   **Reference Audio (Optional):** Click "Browse Reference Audio..." to select a `.wav`, `.mp3`, or `.flac` file to clone its voice characteristics.
-        *   Or pick a microphone and click **Record**, speak for about 10-15 seconds, then click **Stop**. The clip is saved to `reference_recordings/` (ignored by git) and selected automatically. Recordings shorter than 3 seconds are discarded, and recording stops automatically at 30 seconds.
+        *   Or pick a microphone and click **Record...**. A recording window counts down from 3 (the live level meter doubles as a mic check), then records while showing elapsed time, a scrolling input-level graph and a too-quiet/clipping indicator. Read the suggested passage aloud (about 15 seconds; each passage covers every English vowel and consonant sound and includes a question and an exclamation for inflection), then click **Stop & Use**. Stop is available after 3 seconds and recording stops automatically at 30 seconds. The clip is saved to `reference_recordings/` (ignored by git) and selected automatically.
+        *   Chatterbox conditions mostly on the first 6-10 seconds of the reference and uses the whole clip for the speaker embedding, so start speaking right away and keep the room quiet.
     *   **Adjust Parameters:** Use the sliders and seed input to fine-tune the output.
         *   **CFG/Pace:** Lower values (e.g., 0.2-0.4) can slow down speech and improve pacing.
         *   **Exaggeration:** Default 0.5 is usually good. Higher values can be more expressive but also faster.

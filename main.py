@@ -133,7 +133,9 @@ from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
 from PySide6.QtMultimedia import (
     QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
 )
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
+from collections import deque
+import time
 import wave
 
 try:
@@ -194,6 +196,27 @@ RECORDING_SAMPLE_RATE = 48000
 MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
+# Read-aloud passages for reference recordings (~15 s each). Each one covers
+# every English vowel, diphthong and consonant (including the rarer "zh",
+# "th", "ng", "oy" sounds) and mixes a statement, question and exclamation to
+# capture inflection. Chatterbox weighs the first 6-10 s most heavily, so the
+# densest sentences come first.
+REFERENCE_READING_SCRIPTS = [
+    "Would you hand me the yellow measuring cup before the soup boils over? "
+    "The quick thinker judged each chance, then sighed with real pleasure. "
+    "Out by the oyster boats, a young fisherman sang about his long voyage home. "
+    "I can't believe it, the whole village showed up early!",
+
+    "Have you ever watched a thunderstorm roll across the open prairie? "
+    "Judy's shiny beige jacket hung on a hook behind the kitchen door. "
+    "Thousands of noisy geese flew south, honking loudly over the calm bay. "
+    "Please, just breathe slowly and think about what you really want!",
+
+    "My brother usually orders the cheese pizza with extra garlic and mushrooms. "
+    "Why would anyone leave a shiny new toy out in the pouring rain? "
+    "The judge thoughtfully weighed the evidence while the phone kept ringing. "
+    "Wow, that's the most beautiful sunset I've seen all year!",
+]
 DEFAULT_LANGUAGE_TEST_TEXTS = {
     "ar": "مرحبا. هذا اختبار قصير للنموذج متعدد اللغات.",
     "da": "Hej. Dette er en kort test af den flersprogede model.",
@@ -638,6 +661,293 @@ class AudioGeneratorThread(QThread):
                 self.error_occurred.emit(
                     f"Generation/stitching error: {str(e)}")
 
+# --- Reference audio recording ---
+
+
+def choose_recording_format(device):
+    audio_format = QAudioFormat()
+    audio_format.setSampleRate(RECORDING_SAMPLE_RATE)
+    audio_format.setChannelCount(1)
+    audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    if device.isFormatSupported(audio_format):
+        return audio_format
+    return device.preferredFormat()
+
+
+def pcm_to_mono_float(data, audio_format):
+    sample_format = audio_format.sampleFormat()
+    dtypes = {
+        QAudioFormat.SampleFormat.UInt8: (np.uint8, 128.0, 128.0),
+        QAudioFormat.SampleFormat.Int16: (np.int16, 0.0, 32768.0),
+        QAudioFormat.SampleFormat.Int32: (np.int32, 0.0, 2147483648.0),
+        QAudioFormat.SampleFormat.Float: (np.float32, 0.0, 1.0),
+    }
+    if sample_format not in dtypes:
+        raise ValueError(f"Unsupported microphone sample format: {sample_format}")
+    dtype, offset, scale = dtypes[sample_format]
+    channels = max(1, audio_format.channelCount())
+    frame_size = np.dtype(dtype).itemsize * channels
+    data = data[:len(data) - len(data) % frame_size]
+    samples = np.frombuffer(data, dtype=dtype).astype(np.float32)
+    samples = (samples - offset) / scale
+    return samples.reshape(-1, channels).mean(axis=1)
+
+
+def dialog_accepted(result):
+    return int(getattr(result, "value", result)) == QDialog.DialogCode.Accepted.value
+
+
+class LevelHistoryWidget(QWidget):
+    """Scrolling bar graph of recent microphone peak levels."""
+
+    def __init__(self, bars=72, parent=None):
+        super().__init__(parent)
+        self.levels = deque([0.0] * bars, maxlen=bars)
+        self.active = False
+        self.setMinimumHeight(64)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def push(self, level):
+        self.levels.append(level)
+        self.update()
+
+    def set_active(self, active):
+        self.active = active
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        width, height = self.width(), self.height()
+        painter.fillRect(self.rect(), self.palette().color(self.backgroundRole()).darker(108))
+        if self.active:
+            normal = self.palette().color(QPalette.ColorRole.Highlight)
+        else:
+            normal = self.palette().color(QPalette.ColorRole.Mid)
+        bar_width = width / len(self.levels)
+        middle = height / 2
+        for index, level in enumerate(self.levels):
+            # Square-root scaling so normal speech fills a useful part of the height.
+            bar_height = max(2.0, min(1.0, level) ** 0.5 * (height - 6))
+            color = QColor("#d9534f") if level >= 0.98 else normal
+            painter.fillRect(
+                int(index * bar_width + 1), int(middle - bar_height / 2),
+                max(1, int(bar_width) - 2), int(bar_height), color)
+        painter.end()
+
+
+class RecordingDialog(QDialog):
+    """Modal recorder: countdown with live mic check, then timed capture."""
+
+    COUNTDOWN_SECONDS = 3
+    TICK_MS = 50
+
+    def __init__(self, device, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Record Reference Audio")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        self.device = device
+        self.audio_format = choose_recording_format(device)
+        self.recorded_bytes = bytearray()
+        self.audio_source = None
+        self.audio_io = None
+        self.phase = "countdown"
+        self.countdown_started = None
+        self.recent_peaks = deque(maxlen=int(1500 / self.TICK_MS))
+
+        layout = QVBoxLayout(self)
+        # Let wrapped labels grow the dialog instead of being clipped.
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        mic_label = QLabel(f"Microphone: {device.description()}")
+        mic_label.setTextFormat(Qt.TextFormat.PlainText)
+        mic_label.setStyleSheet("color: gray;")
+        layout.addWidget(mic_label)
+
+        self.phase_label = QLabel("Get ready...")
+        self.phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        phase_font = QFont(self.phase_label.font())
+        phase_font.setPointSize(phase_font.pointSize() + 2)
+        phase_font.setBold(True)
+        self.phase_label.setFont(phase_font)
+        layout.addWidget(self.phase_label)
+
+        self.big_label = QLabel(str(self.COUNTDOWN_SECONDS))
+        self.big_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        big_font = QFont(self.big_label.font())
+        big_font.setPointSize(big_font.pointSize() + 18)
+        big_font.setBold(True)
+        self.big_label.setFont(big_font)
+        layout.addWidget(self.big_label)
+
+        self.hint_label = QLabel(
+            f"Read the text below at your normal pace (about 15 seconds). Recording "
+            f"stops automatically at {MAX_RECORDING_SECONDS} seconds.")
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint_label.setWordWrap(True)
+        layout.addWidget(self.hint_label)
+
+        self.script_group = script_group = QGroupBox("Read this aloud")
+        script_layout = QVBoxLayout(script_group)
+        self.script_index = 0
+        self.script_label = QLabel()
+        self.script_label.setWordWrap(True)
+        self.script_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.script_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        script_font = QFont(self.script_label.font())
+        script_font.setPointSize(script_font.pointSize() + 3)
+        self.script_label.setFont(script_font)
+        script_layout.addWidget(self.script_label)
+        script_footer = QHBoxLayout()
+        script_note = QLabel("Read with natural expression. Any language works.")
+        script_note.setStyleSheet("color: gray;")
+        self.next_script_button = QPushButton("Different text")
+        self.next_script_button.clicked.connect(self.show_next_script)
+        script_footer.addWidget(script_note, 1)
+        script_footer.addWidget(self.next_script_button)
+        script_layout.addLayout(script_footer)
+        layout.addWidget(script_group)
+        self.show_script(0)
+
+        self.level_widget = LevelHistoryWidget(parent=self)
+        layout.addWidget(self.level_widget)
+
+        self.level_status_label = QLabel("Checking microphone...")
+        self.level_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.level_status_label)
+
+        self.time_bar = QProgressBar()
+        self.time_bar.setRange(0, MAX_RECORDING_SECONDS * 1000)
+        self.time_bar.setValue(0)
+        self.time_bar.setTextVisible(False)
+        self.time_bar.setFixedHeight(8)
+        layout.addWidget(self.time_bar)
+
+        buttons = QHBoxLayout()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        self.stop_button = QPushButton("Stop && Use")
+        self.stop_button.setEnabled(False)
+        self.stop_button.setDefault(True)
+        self.stop_button.clicked.connect(self.accept)
+        buttons.addStretch(1)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.stop_button)
+        layout.addLayout(buttons)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        QTimer.singleShot(0, self._open_microphone)
+
+    def show_script(self, index):
+        self.script_index = index % len(REFERENCE_READING_SCRIPTS)
+        self.script_label.setText(REFERENCE_READING_SCRIPTS[self.script_index])
+
+    def show_next_script(self):
+        self.show_script(self.script_index + 1)
+
+    def _open_microphone(self):
+        # Open during the countdown: Bluetooth headsets need a moment to switch
+        # profiles, and the live meter doubles as a mic check.
+        self.audio_source = QAudioSource(self.device, self.audio_format, self)
+        self.audio_io = self.audio_source.start()
+        error = self.audio_source.error()
+        if self.audio_io is None or getattr(error, "name", "NoError") != "NoError":
+            self._close_microphone()
+            self.phase = "error"
+            self.phase_label.setText("Microphone unavailable")
+            self.big_label.setText("!")
+            self.hint_label.setText(
+                f"Could not open '{self.device.description()}' "
+                f"({getattr(error, 'name', error)}). Check that it is connected and awake, "
+                "and that Windows allows desktop apps to use the microphone "
+                "(Settings > Privacy & security > Microphone).")
+            self.level_status_label.setText("")
+            self.script_group.setVisible(False)
+            self.level_widget.setVisible(False)
+            self.time_bar.setVisible(False)
+            self.cancel_button.setText("Close")
+            return
+        print(
+            f"Recording dialog opened '{self.device.description()}' "
+            f"({self.audio_format.sampleRate()} Hz, {self.audio_format.channelCount()} ch).")
+        self.countdown_started = time.monotonic()
+        self.level_widget.set_active(False)
+        self.timer.start(self.TICK_MS)
+
+    def _close_microphone(self):
+        self.timer.stop()
+        if self.audio_source is not None:
+            self.audio_source.stop()
+            self.audio_source.deleteLater()
+        self.audio_source = None
+        self.audio_io = None
+
+    def recorded_seconds(self):
+        bytes_per_frame = self.audio_format.bytesPerFrame()
+        if not bytes_per_frame:
+            return 0.0
+        return len(self.recorded_bytes) / bytes_per_frame / self.audio_format.sampleRate()
+
+    def _tick(self):
+        chunk = bytes(self.audio_io.readAll().data()) if self.audio_io is not None else b""
+        peak = 0.0
+        if chunk:
+            samples = pcm_to_mono_float(chunk, self.audio_format)
+            if samples.size:
+                peak = float(np.max(np.abs(samples)))
+        self.level_widget.push(peak)
+        self.recent_peaks.append(peak)
+        self._update_level_status()
+
+        if self.phase == "countdown":
+            remaining = self.COUNTDOWN_SECONDS - (time.monotonic() - self.countdown_started)
+            if remaining > 0:
+                self.big_label.setText(str(int(remaining) + 1))
+                return
+            # Countdown audio is a mic check only; capture starts now.
+            self.phase = "recording"
+            self.phase_label.setText("Recording")
+            self.phase_label.setStyleSheet("color: #d9534f;")
+            self.level_widget.set_active(True)
+            self.next_script_button.setEnabled(False)
+            return
+
+        self.recorded_bytes.extend(chunk)
+        elapsed = self.recorded_seconds()
+        self.big_label.setText(
+            f"{int(elapsed) // 60}:{int(elapsed) % 60:02d} / "
+            f"{MAX_RECORDING_SECONDS // 60}:{MAX_RECORDING_SECONDS % 60:02d}")
+        self.time_bar.setValue(int(min(elapsed, MAX_RECORDING_SECONDS) * 1000))
+        if elapsed >= MIN_RECORDING_SECONDS:
+            self.stop_button.setEnabled(True)
+            self.hint_label.setText("Click Stop & Use when you're done.")
+        else:
+            self.hint_label.setText(
+                f"Keep talking - at least {MIN_RECORDING_SECONDS} seconds are needed.")
+        if elapsed >= MAX_RECORDING_SECONDS:
+            self.accept()
+
+    def _update_level_status(self):
+        recent = max(self.recent_peaks) if self.recent_peaks else 0.0
+        if recent >= 0.98:
+            text, color = "Too loud - clipping. Move back a little.", "#d9534f"
+        elif recent < 0.02:
+            text, color = "Too quiet - speak up or check the microphone.", "#e0a030"
+        else:
+            text, color = "Good level", "#3c9a3c"
+        self.level_status_label.setText(text)
+        self.level_status_label.setStyleSheet(f"color: {color};")
+
+    def done(self, result):
+        if self.audio_io is not None and self.phase == "recording":
+            self.recorded_bytes.extend(bytes(self.audio_io.readAll().data()))
+        self._close_microphone()
+        if not dialog_accepted(result):
+            self.recorded_bytes = bytearray()
+        super().done(result)
+
+
 # --- ChatterboxApp ---
 
 
@@ -670,12 +980,8 @@ class ChatterboxApp(QMainWindow):
         self.recordings_directory = os.path.join(
             self.script_dir, REFERENCE_RECORDINGS_DIRNAME)
         self.media_devices = QMediaDevices(self)
-        self.audio_source = None
-        self.recording_io = None
         self.recording_format = None
         self.recording_buffer = bytearray()
-        self.recording_timer = QTimer(self)
-        self.recording_timer.timeout.connect(self.update_recording_display)
 
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -751,22 +1057,15 @@ class ChatterboxApp(QMainWindow):
         self.mic_combo = QComboBox()
         self.mic_combo.setMaximumWidth(220)
         self.mic_combo.setToolTip("Microphone used for recording a reference clip.")
-        self.record_button = QPushButton("Record")
+        self.record_button = QPushButton("Record...")
         self.record_button.setToolTip(
             "Record a reference clip from the selected microphone "
             f"({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s; "
             "about 10-15 s of clean speech works best).")
-        self.record_button.clicked.connect(self.toggle_recording)
+        self.record_button.clicked.connect(self.open_recording_dialog)
         self.media_devices.audioInputsChanged.connect(self.populate_microphones)
         self.populate_microphones()
-        self.record_level_bar = QProgressBar()
-        self.record_level_bar.setRange(0, 100)
-        self.record_level_bar.setTextVisible(False)
-        self.record_level_bar.setFixedWidth(80)
-        self.record_level_bar.setToolTip("Microphone input level")
-        self.record_level_bar.setVisible(False)
         ref_audio_layout.addWidget(self.ref_audio_path_label, 1)
-        ref_audio_layout.addWidget(self.record_level_bar)
         ref_audio_layout.addWidget(self.mic_combo)
         ref_audio_layout.addWidget(self.record_button)
         ref_audio_layout.addWidget(browse_ref_button)
@@ -1161,125 +1460,27 @@ class ChatterboxApp(QMainWindow):
         has_inputs = self.mic_combo.count() > 0
         if not has_inputs:
             self.mic_combo.addItem("No microphone found")
-        self.mic_combo.setEnabled(has_inputs and self.audio_source is None)
-        self.record_button.setEnabled(has_inputs or self.audio_source is not None)
+        self.mic_combo.setEnabled(has_inputs)
+        self.record_button.setEnabled(has_inputs)
 
-    def _choose_recording_format(self, device):
-        audio_format = QAudioFormat()
-        audio_format.setSampleRate(RECORDING_SAMPLE_RATE)
-        audio_format.setChannelCount(1)
-        audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-        if device.isFormatSupported(audio_format):
-            return audio_format
-        return device.preferredFormat()
-
-    def _pcm_to_mono_float(self, data, audio_format):
-        sample_format = audio_format.sampleFormat()
-        dtypes = {
-            QAudioFormat.SampleFormat.UInt8: (np.uint8, 128.0, 128.0),
-            QAudioFormat.SampleFormat.Int16: (np.int16, 0.0, 32768.0),
-            QAudioFormat.SampleFormat.Int32: (np.int32, 0.0, 2147483648.0),
-            QAudioFormat.SampleFormat.Float: (np.float32, 0.0, 1.0),
-        }
-        if sample_format not in dtypes:
-            raise ValueError(f"Unsupported microphone sample format: {sample_format}")
-        dtype, offset, scale = dtypes[sample_format]
-        item_size = np.dtype(dtype).itemsize
-        channels = max(1, audio_format.channelCount())
-        frame_size = item_size * channels
-        data = data[:len(data) - len(data) % frame_size]
-        samples = np.frombuffer(data, dtype=dtype).astype(np.float32)
-        samples = (samples - offset) / scale
-        return samples.reshape(-1, channels).mean(axis=1)
-
-    def toggle_recording(self):
-        if self.audio_source is not None:
-            self.stop_recording(save=True)
-        else:
-            self.start_recording()
-
-    def start_recording(self):
+    def open_recording_dialog(self):
         device = self.mic_combo.currentData()
         if device is None or device.isNull():
             QMessageBox.warning(self, "No Microphone",
                                 "No audio input device is available.")
             return
-        self.recording_format = self._choose_recording_format(device)
-        self.recording_buffer = bytearray()
-        self.recording_level = 0.0
-        self.audio_source = QAudioSource(device, self.recording_format, self)
-        self.recording_io = self.audio_source.start()
-        error = self.audio_source.error()
-        if self.recording_io is None or getattr(error, "name", "NoError") != "NoError":
-            self._teardown_audio_source()
-            QMessageBox.warning(
-                self, "Recording Failed",
-                f"Could not open '{device.description()}' ({getattr(error, 'name', error)}).\n\n"
-                "Check that the microphone is connected and that Windows allows "
-                "desktop apps to access it (Settings > Privacy & security > Microphone).")
+        dialog = RecordingDialog(device, self)
+        if not dialog_accepted(dialog.exec()):
+            self.set_status_message("Status: Recording cancelled.")
             return
-        print(
-            f"Recording reference audio from '{device.description()}' "
-            f"({self.recording_format.sampleRate()} Hz, "
-            f"{self.recording_format.channelCount()} ch).")
-        self.mic_combo.setEnabled(False)
-        self.record_level_bar.setValue(0)
-        self.record_level_bar.setVisible(True)
-        self.recording_timer.start(100)
-        self.update_recording_display()
-
-    def _read_recording_data(self):
-        if self.recording_io is None:
-            return
-        chunk = bytes(self.recording_io.readAll().data())
-        if not chunk:
-            return
-        self.recording_buffer.extend(chunk)
-        levels = self._pcm_to_mono_float(chunk, self.recording_format)
-        if levels.size:
-            self.recording_level = float(np.max(np.abs(levels)))
-
-    def _recorded_seconds(self):
-        bytes_per_frame = self.recording_format.bytesPerFrame()
-        if not bytes_per_frame:
-            return 0.0
-        frames = len(self.recording_buffer) / bytes_per_frame
-        return frames / self.recording_format.sampleRate()
-
-    def update_recording_display(self):
-        if self.audio_source is None:
-            return
-        self._read_recording_data()
-        elapsed = self._recorded_seconds()
-        self.record_button.setText(f"Stop ({int(elapsed) // 60}:{int(elapsed) % 60:02d})")
-        self.record_level_bar.setValue(int(min(1.0, self.recording_level) * 100))
-        self.set_status_message(
-            f"Status: Recording reference audio... {elapsed:.0f}s "
-            f"(auto-stops at {MAX_RECORDING_SECONDS}s)")
-        if elapsed >= MAX_RECORDING_SECONDS:
-            self.stop_recording(save=True)
-
-    def _teardown_audio_source(self):
-        if self.audio_source is not None:
-            self.audio_source.stop()
-            self.audio_source.deleteLater()
-        self.audio_source = None
-        self.recording_io = None
-
-    def stop_recording(self, save=True):
-        self.recording_timer.stop()
-        self._read_recording_data()
-        self._teardown_audio_source()
-        self.record_button.setText("Record")
-        self.record_level_bar.setVisible(False)
-        self.populate_microphones()
-        if save:
-            self._save_recording()
+        self.recording_format = dialog.audio_format
+        self.recording_buffer = dialog.recorded_bytes
+        self._save_recording()
         self.recording_buffer = bytearray()
 
     def _save_recording(self):
         audio_format = self.recording_format
-        mono = self._pcm_to_mono_float(bytes(self.recording_buffer), audio_format)
+        mono = pcm_to_mono_float(bytes(self.recording_buffer), audio_format)
         duration = mono.size / audio_format.sampleRate()
         if duration < MIN_RECORDING_SECONDS:
             self.set_status_message("Status: Recording discarded (too short).")
@@ -1976,8 +2177,6 @@ class ChatterboxApp(QMainWindow):
             APP_LOG_SINK = None
         self.save_window_settings()
         self.save_app_settings()
-        if self.audio_source is not None:
-            self.stop_recording(save=False)
         if hasattr(self, 'model_loader_thread') and self.model_loader_thread.isRunning():
             self.model_loader_thread.quit()
             self.model_loader_thread.wait()
