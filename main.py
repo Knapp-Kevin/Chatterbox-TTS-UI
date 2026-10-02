@@ -136,6 +136,7 @@ from PySide6.QtMultimedia import (
 )
 from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
 import ui_theme
+import audio_effects
 from collections import deque
 import time
 import wave
@@ -273,25 +274,32 @@ DEFAULT_MODELS_CONFIG = {
 
 
 class SliderWithValue(QWidget):
-    def __init__(self, min_val, max_val, step_val, default_val):
+    def __init__(self, min_val, max_val, step_val, default_val, value_format="{:.2f}"):
         super().__init__()
         self._step_val = step_val
+        self._value_format = value_format
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setMinimum(int(min_val / step_val))
-        self.slider.setMaximum(int(max_val / step_val))
-        self.slider.setValue(int(default_val / step_val))
+        # round(), not int(): e.g. int(0.25 / 0.05) truncates to 4.
+        self.slider.setMinimum(round(min_val / step_val))
+        self.slider.setMaximum(round(max_val / step_val))
+        self.slider.setValue(round(default_val / step_val))
         self.slider.setSingleStep(1)
-        self.value_label = QLabel(f"{default_val:.2f}")
+        self.value_label = QLabel(value_format.format(default_val))
+        widest = max((value_format.format(v) for v in (min_val, max_val)), key=len)
+        self.value_label.setMinimumWidth(self.value_label.fontMetrics().horizontalAdvance(widest) + 6)
         self.slider.valueChanged.connect(
-            lambda val, lbl=self.value_label, s=step_val: lbl.setText(f"{val * s:.2f}")
+            lambda val: self.value_label.setText(self._value_format.format(val * self._step_val))
         )
         layout.addWidget(self.slider)
         layout.addWidget(self.value_label)
 
     def get_value(self):
         return self.slider.value() * self._step_val
+
+    def set_value(self, value):
+        self.slider.setValue(round(value / self._step_val))
 
 
 def read_models_config_payload(config_path):
@@ -493,8 +501,10 @@ class AudioGeneratorThread(QThread):
         repetition_penalty=1.2,
         min_p=0.05,
         top_p=1.0,
+        finishing=None,
     ):
         super().__init__()
+        self.finishing = finishing or audio_effects.FinishingSettings()
         self.model = model
         self.original_text = text
         self.audio_prompt_path = audio_prompt_path
@@ -646,11 +656,17 @@ class AudioGeneratorThread(QThread):
                 return
 
             print("\nConcatenating audio chunks...")
-            final_audio_tensor = torch.cat(all_audio_tensors, dim=1)
+            finishing = self.finishing
+            sections = [chunk.reshape(-1).float().numpy() for chunk in all_audio_tensors]
+            final_audio = audio_effects.join_sections(sections, sr, finishing.section_pause)
+            print(f"Applying finishing touches: {finishing.summary()}")
+            final_audio = audio_effects.apply_finishing(final_audio, sr, finishing)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"chatterbox_{timestamp}_seed{self.actual_seed_used}_full_stitched.wav"
-            output_path = os.path.join(self.output_dir, filename)
-            torchaudio.save(output_path, final_audio_tensor, sr)
+            output_base = os.path.join(
+                self.output_dir,
+                f"chatterbox_{timestamp}_seed{self.actual_seed_used}_full_stitched")
+            output_path = audio_effects.save_audio(
+                output_base, final_audio, sr, finishing.output_format)
             print(f"Final stitched audio saved to: {output_path}")
             self.generation_complete.emit(output_path, sr)
         except Exception as e:
@@ -1203,6 +1219,79 @@ class ChatterboxApp(QMainWindow):
         delivery_hint.setObjectName("Muted")
         delivery_hint.setWordWrap(True)
         delivery_layout.addWidget(delivery_hint)
+
+        finishing_header = QHBoxLayout()
+        self.finishing_toggle = self._link(QPushButton())
+        self.finishing_toggle.setToolTip("Adjustments applied to the audio after it is generated.")
+        self.finishing_toggle.clicked.connect(
+            lambda: self.set_finishing_expanded(self.finishing_panel.isHidden()))
+        finishing_header.addWidget(self.finishing_toggle)
+        self.finishing_summary_label = QLabel()
+        self.finishing_summary_label.setObjectName("Muted")
+        finishing_header.addWidget(self.finishing_summary_label)
+        finishing_header.addStretch(1)
+        delivery_layout.addLayout(finishing_header)
+
+        self.finishing_panel = QWidget()
+        finishing_grid = QGridLayout(self.finishing_panel)
+        finishing_grid.setContentsMargins(0, 0, 0, 0)
+        finishing_grid.setHorizontalSpacing(14)
+        finishing_grid.setColumnStretch(1, 1)
+        finishing_grid.setColumnStretch(3, 1)
+
+        def add_finishing(row, column, title, widget, tooltip):
+            label = QLabel(title)
+            label.setToolTip(tooltip)
+            widget.setToolTip(tooltip)
+            finishing_grid.addWidget(label, row, column)
+            finishing_grid.addWidget(widget, row, column + 1)
+
+        self.speed_slider = self._create_slider(
+            *audio_effects.SPEED_RANGE, 0.05, 1.0, "{:.2f}x")
+        add_finishing(0, 0, "Speed", self.speed_slider,
+                      "Speaking speed without changing the pitch. 1.00x is unchanged.")
+        self.pitch_slider = self._create_slider(
+            *audio_effects.PITCH_RANGE, 0.5, 0.0, "{:+.1f} st")
+        add_finishing(0, 2, "Pitch", self.pitch_slider,
+                      "Raise or lower the voice in semitones while keeping its natural "
+                      "character. Small changes (1-2 st) sound most natural.")
+        self.pause_slider = self._create_slider(
+            *audio_effects.PAUSE_RANGE, 0.1, 0.0, "{:.1f} s")
+        add_finishing(1, 0, "Section pause", self.pause_slider,
+                      f"Long text is generated in sections of about {MAX_TEXT_INPUT_LENGTH} "
+                      "characters. This adds a pause where the sections are joined.")
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItems(list(audio_effects.OUTPUT_FORMATS))
+        add_finishing(1, 2, "Save as", self.output_format_combo,
+                      "WAV is uncompressed, FLAC is lossless and smaller, MP3 is "
+                      "smallest and plays everywhere.")
+        finishing_checks = QHBoxLayout()
+        self.even_volume_checkbox = QCheckBox("Even out volume")
+        self.even_volume_checkbox.setToolTip(
+            "Bring every result to a consistent, comfortable loudness without clipping.")
+        self.trim_silence_checkbox = QCheckBox("Trim silence at start and end")
+        self.trim_silence_checkbox.setToolTip(
+            "Remove dead air before the first word and after the last.")
+        finishing_checks.setSpacing(24)
+        finishing_checks.addWidget(self.even_volume_checkbox)
+        finishing_checks.addWidget(self.trim_silence_checkbox)
+        finishing_checks.addStretch(1)
+        reset_finishing_button = QPushButton("Reset")
+        reset_finishing_button.setToolTip("Restore the default finishing settings.")
+        reset_finishing_button.clicked.connect(
+            lambda: self.apply_finishing_settings(audio_effects.FinishingSettings()))
+        finishing_checks.addWidget(reset_finishing_button)
+        finishing_grid.addLayout(finishing_checks, 2, 0, 1, 4)
+        delivery_layout.addWidget(self.finishing_panel)
+
+        for slider in (self.speed_slider, self.pitch_slider, self.pause_slider):
+            slider.slider.valueChanged.connect(self.update_finishing_summary)
+        self.output_format_combo.currentTextChanged.connect(self.update_finishing_summary)
+        self.even_volume_checkbox.toggled.connect(self.update_finishing_summary)
+        self.trim_silence_checkbox.toggled.connect(self.update_finishing_summary)
+        self.apply_finishing_settings(
+            audio_effects.FinishingSettings.from_dict(self.app_settings.get("finishing")))
+        self.set_finishing_expanded(bool(self.app_settings.get("finishing_expanded", False)))
         generate_layout.addWidget(delivery_card)
 
         player_card, player_layout = self._make_card()
@@ -1467,6 +1556,9 @@ class ChatterboxApp(QMainWindow):
             print(f"Failed to save window settings: {exc}")
 
     def save_app_settings(self):
+        if hasattr(self, "speed_slider"):
+            self.app_settings["finishing"] = self.current_finishing_settings().to_dict()
+            self.app_settings["finishing_expanded"] = not self.finishing_panel.isHidden()
         try:
             write_json_payload(self.app_settings_path, self.app_settings)
         except Exception as exc:
@@ -1549,6 +1641,7 @@ class ChatterboxApp(QMainWindow):
                 repetition_penalty=self.repetition_penalty,
                 min_p=self.min_p,
                 top_p=self.top_p,
+                finishing=self.current_finishing_settings(),
             )
             self.audio_generator_thread.generation_complete.connect(
                 self.on_generation_complete)
@@ -1574,8 +1667,8 @@ class ChatterboxApp(QMainWindow):
                     "UI: Stop requested, but no active generation thread found. Resetting UI.")
                 self.on_generation_thread_finished()  # Manually trigger UI reset
 
-    def _create_slider(self, min_val, max_val, step_val, default_val):
-        return SliderWithValue(min_val, max_val, step_val, default_val)
+    def _create_slider(self, min_val, max_val, step_val, default_val, value_format="{:.2f}"):
+        return SliderWithValue(min_val, max_val, step_val, default_val, value_format)
 
     def browse_reference_audio(self):
         default_dir = self.last_reference_audio_dir
@@ -1584,6 +1677,36 @@ class ChatterboxApp(QMainWindow):
         if file_path:
             self.set_reference_audio(file_path)
             self.last_reference_audio_dir = os.path.dirname(file_path)
+
+    # --- Finishing touches ---
+
+    def current_finishing_settings(self):
+        return audio_effects.FinishingSettings(
+            speed=round(self.speed_slider.get_value(), 2),
+            pitch_semitones=round(self.pitch_slider.get_value(), 1),
+            section_pause=round(self.pause_slider.get_value(), 1),
+            even_volume=self.even_volume_checkbox.isChecked(),
+            trim_silence=self.trim_silence_checkbox.isChecked(),
+            output_format=self.output_format_combo.currentText(),
+        )
+
+    def apply_finishing_settings(self, settings):
+        self.speed_slider.set_value(settings.speed)
+        self.pitch_slider.set_value(settings.pitch_semitones)
+        self.pause_slider.set_value(settings.section_pause)
+        self.even_volume_checkbox.setChecked(settings.even_volume)
+        self.trim_silence_checkbox.setChecked(settings.trim_silence)
+        self.output_format_combo.setCurrentText(settings.output_format)
+        self.update_finishing_summary()
+
+    def update_finishing_summary(self, *_args):
+        self.finishing_summary_label.setText(self.current_finishing_settings().summary())
+
+    def set_finishing_expanded(self, expanded):
+        self.finishing_panel.setVisible(expanded)
+        arrow = "\u25be" if expanded else "\u25b8"
+        self.finishing_toggle.setText(f"{arrow} Finishing touches")
+        self.finishing_summary_label.setVisible(not expanded)
 
     # --- Voice selection ---
 
@@ -2289,7 +2412,7 @@ class ChatterboxApp(QMainWindow):
         self.output_log_listwidget.clear()
         try:
             files = sorted([os.path.join(self.output_directory, f)for f in os.listdir(
-                self.output_directory)if f.endswith(".wav")], key=os.path.getmtime, reverse=True)
+                self.output_directory)if f.lower().endswith(audio_effects.AUDIO_EXTENSIONS)], key=os.path.getmtime, reverse=True)
             for f_path in files:
                 item = QListWidgetItem(os.path.basename(f_path))
                 item.setData(Qt.ItemDataRole.UserRole, f_path)

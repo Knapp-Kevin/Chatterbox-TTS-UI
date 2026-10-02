@@ -47,6 +47,7 @@ def _asset(name):
 
 LIGHT["chevron"] = _asset("chevron_down_light.svg")
 DARK["chevron"] = _asset("chevron_down_dark.svg")
+LIGHT["check"] = DARK["check"] = _asset("check.svg")
 
 
 def _is_dark(app):
@@ -150,7 +151,8 @@ def _stylesheet(c):
     QProgressBar::chunk {{ background: {c['accent']}; border-radius: 4px; }}
 
     QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {c['border']}; background: {c['surface_alt']}; }}
-    QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; }}
+    QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({c['check']}); }}
+    QCheckBox {{ spacing: 8px; }}
 
     QGroupBox {{ border: 1px solid {c['border']}; border-radius: 8px; margin-top: 10px; padding-top: 6px; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: {c['muted']}; }}
