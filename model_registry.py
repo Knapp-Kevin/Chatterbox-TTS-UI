@@ -17,13 +17,14 @@ from huggingface_hub.errors import (
 ENTRY_KEYS = (
     "repo_id", "label", "enabled", "experimental", "test_text", "test_texts",
     "notes", "backend", "language_id", "multilingual_t3_model", "qwen_variant",
-    "license", "download_bytes",
+    "license", "download_bytes", "voxcpm_mode",
 )
 
 # ---------- licenses ----------
 
 # Licenses of the models the app ships with, for entries saved before licenses were recorded.
-KNOWN_LICENSES = {"ResembleAI/chatterbox": "mit", "Qwen/": "apache-2.0", "hexgrad/": "apache-2.0"}
+KNOWN_LICENSES = {"ResembleAI/chatterbox": "mit", "Qwen/": "apache-2.0", "hexgrad/": "apache-2.0",
+                  "openbmb/": "apache-2.0"}
 PERMISSIVE_LICENSES = {
     "mit": "MIT", "apache-2.0": "Apache 2.0", "bsd-2-clause": "BSD", "bsd-3-clause": "BSD",
     "cc-by-4.0": "CC BY 4.0", "cc0-1.0": "CC0", "unlicense": "Unlicense", "mpl-2.0": "MPL 2.0",
@@ -98,7 +99,16 @@ ENGINES = {
                     "7 languages. Runs in its own environment (Apache-2.0).",
         languages_summary="7 languages",
     ),
+    "voxcpm": Engine(
+        key="voxcpm",
+        label="VoxCPM2",
+        description="One 2B-parameter model for voice cloning (with optional style and a clip "
+                    "transcript for closer likeness) and voice design from a description. 30 "
+                    "languages, 48 kHz output. Runs in its own environment (Apache-2.0).",
+        languages_summary="30 languages",
+    ),
 }
+VOXCPM_MODES = {"clone": "Voice cloning", "design": "Voice design"}
 
 QWEN_VARIANTS = {
     "custom_voice": "Preset voices",
@@ -136,7 +146,7 @@ def key_weight_file(entry):
     """The large file whose presence means the entry's model is downloaded."""
     if entry.get("backend") == "legacy":
         return "t3_cfg.safetensors"
-    if entry.get("backend") == "qwen3":
+    if entry.get("backend") in ("qwen3", "voxcpm"):
         return "model.safetensors"
     if entry.get("backend") == "kokoro":
         return "config.json"  # plus a .pth, checked in is_downloaded
@@ -157,6 +167,8 @@ def capability_for(entry):
         return QWEN_CAPABILITY.get(entry.get("qwen_variant"), "clone")
     if entry.get("backend") == "kokoro":
         return "preset"
+    if entry.get("backend") == "voxcpm":
+        return "design" if entry.get("voxcpm_mode") == "design" else "clone"
     return "clone"  # Chatterbox clones, or uses its built-in voice with no clip
 
 
@@ -174,6 +186,8 @@ def engine_label(entry):
     engine = engine_for(entry)
     if engine.key == "qwen3":
         return f"{engine.label} · {QWEN_VARIANTS.get(entry.get('qwen_variant'), 'unknown variant')}"
+    if engine.key == "voxcpm":
+        return f"{engine.label} · {VOXCPM_MODES.get(entry.get('voxcpm_mode'), VOXCPM_MODES['clone'])}"
     return engine.label
 
 
@@ -183,6 +197,8 @@ def entry_to_json(entry):
         payload.pop("multilingual_t3_model", None)
     if payload.get("backend") != "qwen3":
         payload.pop("qwen_variant", None)
+    if payload.get("backend") != "voxcpm":
+        payload.pop("voxcpm_mode", None)
     elif payload.get("multilingual_t3_model", "").endswith(".safetensors"):
         for short, filename in WEIGHT_VERSIONS.items():
             if payload["multilingual_t3_model"] == filename:
@@ -249,6 +265,10 @@ def hardware_needs(backend, repo_id=""):
     """Rough GPU memory needs, measured on an RTX 5070 Ti where noted."""
     if backend == "kokoro":
         return HardwareNeeds(2, 2, True, "Small model; also quick on a CPU.")
+    if backend == "voxcpm":
+        if (_billions(repo_id) or 2) < 1:
+            return HardwareNeeds(4, 6, False, "The original 0.5B VoxCPM. Very slow on a CPU.")
+        return HardwareNeeds(6, 8, False, "Peaks around 5.9 GB while generating. Very slow on a CPU.")
     if backend == "qwen3":
         if (_billions(repo_id) or 1.7) < 1:
             return HardwareNeeds(4, 8, False, "Smaller batches below 8 GB. Very slow on a CPU.")
@@ -310,6 +330,11 @@ def check_repo(repo_id, token=None):
         files = ENGINE_FILES["multilingual"] + ([WEIGHT_VERSIONS[best]] if best else ["t3_23lang.safetensors"])
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
+    elif _is_voxcpm_layout(sizes):
+        download = sum(sizes.values())
+        access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
+        return RepoCheck(True, f"Found: VoxCPM · about {format_size(download)} to download · {access}",
+                         "voxcpm", (), download, gated, private, "", license_id)
     elif _is_kokoro_layout(sizes):
         files = [name for name in sizes if name.endswith(".pth") and "/" not in name] + ["config.json"]
         files += [name for name in sizes if name.startswith("voices/") and name.endswith(".pt")]
@@ -343,6 +368,11 @@ def check_repo(repo_id, token=None):
 # Kokoro voice names start with a language letter; these are the ones its pipeline
 # can speak here (US/UK English, Spanish, French, Hindi, Italian, Portuguese, Mandarin).
 KOKORO_VOICE = re.compile(r"^voices/[abefhipz][fm]_\w+\.pt$")
+
+
+def _is_voxcpm_layout(files):
+    """VoxCPM repos pair an AudioVAE with the language model weights."""
+    return "audiovae.pth" in files and ("model.safetensors" in files or "pytorch_model.bin" in files)
 
 
 def _is_kokoro_layout(files):
@@ -398,6 +428,12 @@ class SearchResult:
     def capability(self):
         return capability_for({"backend": self.backend, "qwen_variant": self.qwen_variant})
 
+    @property
+    def capabilities(self):
+        if self.backend == "voxcpm" and "voice design" in self.summary:
+            return {"clone", "design"}
+        return {self.capability}
+
 
 def _classify(model):
     tags = {tag.lower() for tag in (model.tags or [])}
@@ -415,6 +451,10 @@ def _classify(model):
         size = "0.6B " if "0.6b" in model.id.lower() else "1.7B " if "1.7b" in model.id.lower() else ""
         label = QWEN_VARIANTS.get(variant, "variant confirmed by Check").lower()
         return "qwen3", variant, f"Qwen3-TTS {size}· {label}"
+    if _is_voxcpm_layout(files):
+        version = "VoxCPM2" if "voxcpm2" in model.id.lower() else "VoxCPM"
+        return "voxcpm", "", f"{version} · cloning and voice design" if version == "VoxCPM2" \
+            else f"{version} · voice cloning"
     if _is_kokoro_layout(files):
         voices = sum(1 for name in files if name.startswith("voices/") and name.endswith(".pt"))
         return "kokoro", "", f"Kokoro · {voices} voices"
@@ -434,6 +474,8 @@ def search_models(query="", engine="all", token=None, limit=40):
         listings.append(dict(filter="qwen3_tts", search=query or None))
         if query:
             listings.append(dict(search=query))
+    if engine in ("all", "voxcpm"):
+        listings.append(dict(search=f"voxcpm {query}".strip() if query else "voxcpm"))
     if engine in ("all", "kokoro"):
         listings.append(dict(search=f"kokoro {query}".strip() if query else "kokoro"))
     seen, results = set(), []

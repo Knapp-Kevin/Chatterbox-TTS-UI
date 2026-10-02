@@ -141,6 +141,7 @@ import documents
 import model_registry
 import qwen_engine
 import kokoro_engine
+import voxcpm_engine
 import model_tiles
 import math
 import gc
@@ -201,8 +202,10 @@ MAX_TEXT_INPUT_LENGTH = documents.MAX_SECTION_LENGTH
 LOSSLESS_FORMATS = ["WAV", "FLAC"]
 QWEN_BACKEND = "qwen3"
 KOKORO_BACKEND = "kokoro"
+VOXCPM_BACKEND = "voxcpm"
 # Engines that run in their own environment (engines/<name>), installed on first use.
-ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine}
+ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine, VOXCPM_BACKEND: voxcpm_engine}
+WORKER_MODEL_TYPES = (qwen_engine.QwenModel, kokoro_engine.KokoroModel, voxcpm_engine.VoxCPMModel)
 ENGINE_INSTALL_NOTES = {
     QWEN_BACKEND: ("Qwen", "Qwen3-TTS runs in its own Python environment (engines/qwen) because it "
                            "needs different library versions than Chatterbox.\n\nInstalling downloads "
@@ -213,6 +216,11 @@ ENGINE_INSTALL_NOTES = {
                                "downloads PyTorch (about 3 GB, or nothing if another engine already "
                                "cached it) plus about 300 MB of text-processing packages. The model "
                                "itself is about 340 MB."),
+    VOXCPM_BACKEND: ("VoxCPM", "VoxCPM2 runs in its own Python environment (engines/voxcpm) because it "
+                               "needs packages Chatterbox doesn't use.\n\nInstalling downloads "
+                               "PyTorch (about 3 GB, or nothing if another engine already cached it) "
+                               "plus about 1.5 GB of VoxCPM packages. The model itself is about 5 GB, "
+                               "shared by the voice cloning and voice design entries."),
 }
 
 
@@ -221,6 +229,8 @@ def languages_for_backend(backend):
         return dict(qwen_engine.LANGUAGE_LABELS)
     if backend == KOKORO_BACKEND:
         return dict(kokoro_engine.LANGUAGE_LABELS)
+    if backend == VOXCPM_BACKEND:
+        return dict(voxcpm_engine.LANGUAGE_LABELS)
     return get_supported_languages_for_backend(backend)
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
@@ -240,6 +250,8 @@ DEFAULT_SECONDS_PER_CHAR = {
     ("qwen3", "cuda"): 0.13, ("qwen3", "cpu"): 2.0,  # Qwen on CUDA: see BATCH_COST_SLOPE
     # Kokoro: ~0.001 s/char warm on an RTX 5070 Ti, plus a little per section.
     ("kokoro", "cuda"): 0.002, ("kokoro", "cpu"): 0.02,
+    # VoxCPM2: ~0.06-0.09 s/char on an RTX 5070 Ti (about real time).
+    ("voxcpm", "cuda"): 0.07, ("voxcpm", "cpu"): 1.5,
 }
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
@@ -373,7 +385,7 @@ def load_models_config(config_path):
             repo_id,
             backend,
             label,
-            multilingual_t3_model,
+            multilingual_t3_model or str(item.get("voxcpm_mode", "")),
         )
         if not repo_id or model_key in seen_model_keys:
             continue
@@ -390,6 +402,8 @@ def load_models_config(config_path):
             optional["license"] = str(item["license"]).strip().lower()
         if isinstance(item.get("download_bytes"), int) and item["download_bytes"] > 0:
             optional["download_bytes"] = item["download_bytes"]
+        if backend == "voxcpm":
+            optional["voxcpm_mode"] = "design" if item.get("voxcpm_mode") == "design" else "clone"
         normalized_models.append(
             {
                 **optional,
@@ -473,6 +487,7 @@ class ModelLoaderThread(QThread):
         self.repo_id = repo_id
         self.backend = backend
         self.multilingual_t3_model = multilingual_t3_model
+        self.voxcpm_mode = "clone"
 
     def run(self):
         try:
@@ -497,6 +512,8 @@ class ModelLoaderThread(QThread):
                 model_instance = qwen_engine.load_qwen_model(self.repo_id, log=print)
             elif self.backend == KOKORO_BACKEND:
                 model_instance = kokoro_engine.load_kokoro_model(self.repo_id, log=print)
+            elif self.backend == VOXCPM_BACKEND:
+                model_instance = voxcpm_engine.load_voxcpm_model(self.repo_id, self.voxcpm_mode, log=print)
             else:
                 model_instance = load_chatterbox_model(
                     self.repo_id,
@@ -1017,7 +1034,7 @@ class FindModelsDialog(QDialog):
     """Search Hugging Face for repos this app can load and pick one to add."""
 
     ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"),
-                      ("Kokoro", "kokoro"))
+                      ("Kokoro", "kokoro"), ("VoxCPM", "voxcpm"))
 
     def __init__(self, token, existing_repos, parent=None):
         super().__init__(parent)
@@ -1202,6 +1219,14 @@ class ModelEntryDialog(QDialog):
         self.variant_label = QLabel("Qwen variant")
         form.addRow(self.variant_label, self.variant_combo)
 
+        self.mode_combo = QComboBox()
+        for key, label in model_registry.VOXCPM_MODES.items():
+            self.mode_combo.addItem(label, key)
+        self.mode_combo.setCurrentIndex(max(0, self.mode_combo.findData(entry.get("voxcpm_mode"))))
+        self.mode_combo.setToolTip("VoxCPM2 does both; add one entry for each to switch between them.")
+        self.mode_label = QLabel("Use for")
+        form.addRow(self.mode_label, self.mode_combo)
+
         self.language_combo = QComboBox()
         self.language_combo.setToolTip("Language selected by default when this model is loaded.")
         form.addRow("Default language", self.language_combo)
@@ -1250,6 +1275,8 @@ class ModelEntryDialog(QDialog):
         self.weights_label.setVisible(engine.uses_weights_version)
         self.variant_combo.setVisible(engine.key == QWEN_BACKEND)
         self.variant_label.setVisible(engine.key == QWEN_BACKEND)
+        self.mode_combo.setVisible(engine.key == VOXCPM_BACKEND)
+        self.mode_label.setVisible(engine.key == VOXCPM_BACKEND)
         current = self.language_combo.currentData() or self._preferred_language
         self.language_combo.clear()
         for language_id, name in languages_for_backend(engine.key).items():
@@ -1294,6 +1321,7 @@ class ModelEntryDialog(QDialog):
             "experimental": entry.get("experimental", False),
             "multilingual_t3_model": self.weights_combo.currentData() if engine == "multilingual" else "",
             "qwen_variant": self.variant_combo.currentData() if engine == QWEN_BACKEND else "",
+            "voxcpm_mode": self.mode_combo.currentData() if engine == VOXCPM_BACKEND else "",
             "test_texts": entry.get("test_texts", {}),
         })
         if self.repo_input.text().strip() == self.original.get("repo_id") or self.checked:
@@ -1549,8 +1577,8 @@ class ChatterboxApp(QMainWindow):
         text_card_layout.addLayout(text_header)
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText(
-            "Enter text to synthesize. Long text is split into segments of "
-            f"~{MAX_TEXT_INPUT_LENGTH} characters and stitched together."
+            "Enter text to synthesize, or open a document. Long text is split where a reader "
+            "would pause and stitched back together."
         )
         self.text_input.setMinimumHeight(90)
         self.text_input.setAcceptRichText(False)
@@ -1643,8 +1671,9 @@ class ChatterboxApp(QMainWindow):
         self.qwen_transcript_input.setPlaceholderText(
             "What is said in the reference clip (optional, improves likeness)")
         self.qwen_transcript_input.setToolTip(
-            "With a transcript Qwen clones more closely. Recordings made with Record... fill this "
-            "in with the passage you read; edit it if you said something different.")
+            "With a transcript, Qwen and VoxCPM clone more closely. It must match what is said in "
+            "the clip: a wrong transcript can garble VoxCPM's output. Recordings made with "
+            "Record... fill this in with the passage you read; edit it if you said something different.")
         self.qwen_transcript_input.editingFinished.connect(self.save_reference_transcript)
         qwen_row_layout.addWidget(self.qwen_transcript_label)
         qwen_row_layout.addWidget(self.qwen_transcript_input, 1)
@@ -1655,6 +1684,7 @@ class ChatterboxApp(QMainWindow):
             "Chatterbox uses is added, so output from every engine is marked the same way.")
         self.qwen_settings = qwen_settings
         self.kokoro_settings = self.app_settings.get("kokoro", {})
+        self.voxcpm_settings = self.app_settings.get("voxcpm", {})
         self.qwen_row.setVisible(False)
         self.qwen_watermark_checkbox.setVisible(False)
 
@@ -2554,10 +2584,14 @@ class ChatterboxApp(QMainWindow):
 
     def active_qwen_model(self):
         """The loaded worker-engine model (Qwen or Kokoro), which uses the speaker/style row."""
-        return self.model if isinstance(self.model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)) else None
+        return self.model if isinstance(self.model, WORKER_MODEL_TYPES) else None
 
     def engine_settings(self, model):
-        return self.kokoro_settings if isinstance(model, kokoro_engine.KokoroModel) else self.qwen_settings
+        if isinstance(model, kokoro_engine.KokoroModel):
+            return self.kokoro_settings
+        if isinstance(model, voxcpm_engine.VoxCPMModel):
+            return self.voxcpm_settings
+        return self.qwen_settings
 
     def fill_speaker_combo(self, model):
         """Built-in voices; Kokoro's are filtered to the selected language."""
@@ -2596,21 +2630,24 @@ class ChatterboxApp(QMainWindow):
             mode = qwen.mode
             self.fill_speaker_combo(qwen)
             self.qwen_watermark_checkbox.setChecked(bool(self.engine_settings(qwen).get("watermark", True)))
+            settings = self.engine_settings(qwen)
+            voxcpm = isinstance(qwen, voxcpm_engine.VoxCPMModel)
             if mode == "voice_design":
                 self.qwen_instruct_label.setText("Voice description")
                 self.qwen_instruct_input.setPlaceholderText(
                     "e.g. a calm, low male voice with a slight rasp, unhurried and warm")
-                self.qwen_instruct_input.setText(self.qwen_settings.get("description", ""))
+                self.qwen_instruct_input.setText(settings.get("description", ""))
             else:
                 self.qwen_instruct_label.setText("Style")
                 self.qwen_instruct_input.setPlaceholderText(
+                    "Optional, e.g. slightly faster and cheerful" if voxcpm else
                     "Optional, e.g. excited and upbeat, or whisper softly")
-                self.qwen_instruct_input.setText(self.qwen_settings.get("style", ""))
+                self.qwen_instruct_input.setText(settings.get("style", ""))
             self.qwen_speaker_label.setText("Voice" if mode == "preset" else "Speaker")
             for widget in (self.qwen_speaker_label, self.qwen_speaker_combo):
                 widget.setVisible(mode in ("custom_voice", "preset"))
             for widget in (self.qwen_instruct_label, self.qwen_instruct_input):
-                widget.setVisible(mode in ("custom_voice", "voice_design"))
+                widget.setVisible(mode in ("custom_voice", "voice_design") or (voxcpm and mode == "base"))
             for widget in (self.qwen_transcript_label, self.qwen_transcript_input):
                 widget.setVisible(mode == "base")
         self.refresh_voice_chip()
@@ -2632,7 +2669,7 @@ class ChatterboxApp(QMainWindow):
             text = "Default voice"
             tip = "The model's built-in voice. Pick a reference clip on the Voice page to clone a voice."
             if qwen is not None:
-                text, tip = "No clip selected", "Qwen voice cloning needs a reference clip from the Voice page."
+                text, tip = "No clip selected", "This cloning model needs a reference clip from the Voice page."
         self.voice_chip.setText(text)
         self.voice_chip.setToolTip(tip)
 
@@ -2645,7 +2682,7 @@ class ChatterboxApp(QMainWindow):
         if qwen.mode == "voice_design" and not instruct:
             return "Describe the voice you want (Voice description, in the Delivery card) first."
         if qwen.mode == "base" and not self.ref_audio_path_label.toolTip():
-            return "Choose a reference clip on the Voice page; Qwen cloning needs one."
+            return "Choose a reference clip on the Voice page; this cloning model needs one."
         qwen.speaker = self.qwen_speaker_combo.currentData() or qwen.speaker
         qwen.watermark = self.qwen_watermark_checkbox.isChecked()
         if isinstance(qwen, kokoro_engine.KokoroModel):
@@ -2656,9 +2693,16 @@ class ChatterboxApp(QMainWindow):
             return None
         qwen.instruct = instruct
         qwen.ref_text = self.qwen_transcript_input.text().strip() if qwen.mode == "base" else ""
+        if hasattr(qwen, "begin_run"):
+            qwen.begin_run()
         key = "description" if qwen.mode == "voice_design" else "style"
-        self.qwen_settings.update({key: instruct, "speaker": qwen.speaker, "watermark": qwen.watermark})
-        self.app_settings["qwen"] = self.qwen_settings
+        settings = self.engine_settings(qwen)
+        settings.update({key: instruct, "watermark": qwen.watermark})
+        if isinstance(qwen, voxcpm_engine.VoxCPMModel):
+            self.app_settings["voxcpm"] = settings
+        else:
+            settings["speaker"] = qwen.speaker
+            self.app_settings["qwen"] = settings
         return None
 
     @staticmethod
@@ -2944,11 +2988,15 @@ class ChatterboxApp(QMainWindow):
 
     @staticmethod
     def entry_key(entry):
+        if entry.get("backend") == VOXCPM_BACKEND:
+            return (entry.get("repo_id"), VOXCPM_BACKEND, entry.get("voxcpm_mode") or "clone")
         return (entry.get("repo_id"), entry.get("backend"), entry.get("multilingual_t3_model") or "")
 
     def loaded_entry_key(self):
         backend = self.current_model_backend
         weights = self.current_multilingual_t3_model if backend == BACKEND_MULTILINGUAL else ""
+        if backend == VOXCPM_BACKEND:
+            weights = getattr(self, "current_voxcpm_mode", "clone")
         return (self.current_model_repo, backend, weights or "")
 
     def refresh_models_page(self, select_entry=None):
@@ -3149,7 +3197,7 @@ class ChatterboxApp(QMainWindow):
         existing = {entry.get("repo_id") for entry in self.model_entries}
         capability = self.current_capability()
         title = model_registry.CAPABILITIES[capability][0].lower()
-        matching = [r for r in results if r.capability == capability and r.repo_id not in existing]
+        matching = [r for r in results if capability in r.capabilities and r.repo_id not in existing]
         self.discover_tiles.set_tiles([self.discover_tile(result) for result in matching[:30]])
         query = self.discover_input.text().strip()
         if self.discover_error:
@@ -3190,6 +3238,8 @@ class ChatterboxApp(QMainWindow):
 
     def add_from_discover(self, result):
         seed = {"repo_id": result.repo_id}
+        if result.backend == VOXCPM_BACKEND:
+            seed["voxcpm_mode"] = "design" if self.current_capability() == "design" else "clone"
         if result.license:
             seed["license"] = result.license
         new_entry = self._edit_entry_dialog(seed)
@@ -3445,7 +3495,8 @@ class ChatterboxApp(QMainWindow):
         if preferred_index >= 0:
             self.language_combo.setCurrentIndex(preferred_index)
 
-        is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND, KOKORO_BACKEND)
+        is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND, KOKORO_BACKEND,
+                                                            VOXCPM_BACKEND)
         self.language_combo.setEnabled(is_multilingual)
         self.language_combo.setToolTip(
             "Language used by the multilingual Chatterbox backend."
@@ -3490,7 +3541,7 @@ class ChatterboxApp(QMainWindow):
     def release_model(self):
         """Free the current model (and stop a Qwen worker) before loading another."""
         old_model, self.model = self.model, None
-        if isinstance(old_model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)):
+        if isinstance(old_model, WORKER_MODEL_TYPES):
             old_model.close()
         del old_model
         gc.collect()
@@ -3509,6 +3560,10 @@ class ChatterboxApp(QMainWindow):
         selected_entry = selected_entry or self.get_selected_model_entry()
         selected_repo = selected_entry["repo_id"]
         selected_backend = selected_entry.get("backend", BACKEND_MULTILINGUAL)
+        if (selected_backend == VOXCPM_BACKEND and isinstance(self.model, voxcpm_engine.VoxCPMModel)
+                and self.model.repo_id == selected_repo):
+            self.switch_voxcpm_mode(selected_entry)
+            return
         selected_multilingual_t3_model = selected_entry.get(
             "multilingual_t3_model",
             DEFAULT_MULTILINGUAL_T3_MODEL,
@@ -3524,16 +3579,28 @@ class ChatterboxApp(QMainWindow):
         self.preview_button.setEnabled(False)
         self.release_model()
         self.set_model_loading_state(True)
+        self.current_voxcpm_mode = selected_entry.get("voxcpm_mode") or "clone"
         self.model_loader_thread = ModelLoaderThread(
             selected_repo,
             selected_backend,
             selected_multilingual_t3_model,
         )
+        self.model_loader_thread.voxcpm_mode = self.current_voxcpm_mode
         self.cuda_runtime_issue = self.model_loader_thread.cuda_probe_error
         self.model_loader_thread.model_loaded.connect(self.on_model_loaded)
         self.model_loader_thread.error_occurred.connect(
             self.on_model_load_error)
         self.model_loader_thread.start()
+
+    def switch_voxcpm_mode(self, entry):
+        """Switch the loaded VoxCPM model between cloning and design without reloading."""
+        self.current_voxcpm_mode = entry.get("voxcpm_mode") or "clone"
+        self.model.set_mode(self.current_voxcpm_mode)
+        self.set_status_message(f"Status: Switched to {entry['label']} (same model, no reload). Ready.")
+        self.update_engine_controls()
+        self.refresh_language_options()
+        self.update_text_stats()
+        self.render_model_tiles()
 
     def on_model_loaded(self, model_instance, device_used):
         self.model_is_warm = False
@@ -3878,7 +3945,7 @@ class ChatterboxApp(QMainWindow):
         if hasattr(self, 'audio_generator_thread') and self.audio_generator_thread.isRunning():
             self.audio_generator_thread.stop()  # Request stop
             self.audio_generator_thread.wait()  # Wait for it to finish
-        if isinstance(self.model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)):
+        if isinstance(self.model, WORKER_MODEL_TYPES):
             self.model.close()
         event.accept()
 

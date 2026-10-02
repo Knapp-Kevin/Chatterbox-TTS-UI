@@ -70,6 +70,32 @@
       "language_id": "en",
       "license": "apache-2.0",
       "download_bytes": 355479286
+    },
+    {
+      "repo_id": "openbmb/VoxCPM2",
+      "label": "VoxCPM2 voice cloning",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Clones the reference clip from the Voice page; add a Style to steer delivery, or a Clip transcript for closer likeness.",
+      "backend": "voxcpm",
+      "language_id": "en",
+      "license": "apache-2.0",
+      "download_bytes": 4960731866,
+      "voxcpm_mode": "clone"
+    },
+    {
+      "repo_id": "openbmb/VoxCPM2",
+      "label": "VoxCPM2 voice design",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Creates a voice from a written description; one voice is kept for the whole document.",
+      "backend": "voxcpm",
+      "language_id": "en",
+      "license": "apache-2.0",
+      "download_bytes": 4960731866,
+      "voxcpm_mode": "design"
     }
   ]
 }

@@ -13,6 +13,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Voice cloning**, which can use a transcript of the clip for closer likeness.
 
   Qwen runs in its own environment, which the app offers to install. Its output can carry the same AI watermark as Chatterbox.
+- **VoxCPM2 engine (optional).** One 5 GB model for voice cloning (with an optional style, and a clip transcript for closer likeness) and voice design, in 30 languages at 48 kHz. The two uses share one download and switch instantly. A designed voice stays the same through a whole document. VoxCPM runs in its own environment, which the app offers to install, and can add the same AI watermark.
 - **Kokoro engine (optional).** 49 built-in voices in 7 languages from a 340 MB model, about 20× faster than Chatterbox. Pick a language, then a voice; the choice is remembered per language. Kokoro runs in its own environment, which the app offers to install, and can add the same AI watermark.
 - **GPU requirements on every model tile.** Each tile shows the GPU memory the model needs next to your GPU's, in green when it fits, amber when it runs but slower, and red when the GPU is too small.
 - **Faster Qwen documents.** Long text is generated in batches (up to 16 sections or about 5,000 characters per call), roughly 5× faster. Oversized batches are split automatically if the GPU runs out of memory.
