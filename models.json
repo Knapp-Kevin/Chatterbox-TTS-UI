@@ -61,8 +61,8 @@
       "test_text": "Hello. This is a short test of a Qwen preset voice.",
       "notes": "Built-in speakers you can steer with plain-language style instructions.",
       "backend": "qwen3",
-      "qwen_variant": "custom_voice",
-      "language_id": "en"
+      "language_id": "en",
+      "qwen_variant": "custom_voice"
     },
     {
       "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
@@ -72,8 +72,8 @@
       "test_text": "Hello. This voice was designed from a written description.",
       "notes": "Creates a new voice from a written description.",
       "backend": "qwen3",
-      "qwen_variant": "voice_design",
-      "language_id": "en"
+      "language_id": "en",
+      "qwen_variant": "voice_design"
     },
     {
       "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -83,8 +83,8 @@
       "test_text": "Hello. This is a short test of Qwen voice cloning.",
       "notes": "Clones the reference clip from the Voice page; a transcript of the clip improves likeness.",
       "backend": "qwen3",
-      "qwen_variant": "base",
-      "language_id": "en"
+      "language_id": "en",
+      "qwen_variant": "base"
     }
   ]
 }

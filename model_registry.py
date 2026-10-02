@@ -39,9 +39,10 @@ ENGINES = {
     ),
     "legacy": Engine(
         key="legacy",
-        label="Chatterbox English",
-        description="The original English-only Chatterbox layout.",
-        languages_summary="English",
+        label="Chatterbox original",
+        description="The original single-language Chatterbox layout: English for the official "
+                    "weights, or the language a community fine-tune was trained on.",
+        languages_summary="single language",
     ),
     "qwen3": Engine(
         key="qwen3",
@@ -231,6 +232,91 @@ def _check_qwen_repo(repo_id, token, sizes, gated, private):
     return RepoCheck(True, f"Found: Qwen3-TTS, {QWEN_VARIANTS[variant].lower()} "
                            f"· about {format_size(download)} to download · {access}",
                      "qwen3", (), download, gated, private, variant)
+
+
+# ---------- discovery ----------
+
+CHATTERBOX_KEY_FILES = {"t3_mtl23ls_v3.safetensors", "t3_mtl23ls_v2.safetensors",
+                        "t3_23lang.safetensors", "t3_cfg.safetensors"}
+# Same names, different formats (Apple MLX, GGUF, ONNX ...) or test fixtures.
+EXCLUDED_TAGS = {"mlx", "mlx-audio", "gguf", "onnx", "openvino", "coreml", "coremltools", "ggml"}
+QWEN_NAME_HINTS = {"customvoice": "custom_voice", "voicedesign": "voice_design", "base": "base"}
+KNOWN_LANGUAGE_TAGS = {
+    "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl",
+    "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh", "id", "bn", "fa", "uk", "vi", "th", "cs",
+    "ro", "hu", "ur", "ta", "te", "mos",
+}
+
+
+@dataclass
+class SearchResult:
+    repo_id: str
+    backend: str
+    summary: str
+    downloads: int
+    likes: int
+    gated: bool
+    languages: tuple
+    updated: str
+    qwen_variant: str = ""
+
+
+def _classify(model):
+    tags = {tag.lower() for tag in (model.tags or [])}
+    if tags & EXCLUDED_TAGS or "tiny-random" in model.id.lower():
+        return None
+    files = {sibling.rfilename for sibling in (model.siblings or [])}
+    if files & CHATTERBOX_KEY_FILES:
+        if files & (CHATTERBOX_KEY_FILES - {"t3_cfg.safetensors"}):
+            versions = [v.upper() for v, f in WEIGHT_VERSIONS.items() if f in files]
+            return "multilingual", "", "Chatterbox multilingual" + (f" {'/'.join(versions)}" if versions else "")
+        return "legacy", "", "Chatterbox original (single language)"
+    if "qwen3_tts" in tags and "model.safetensors" in files and "config.json" in files:
+        name = model.id.split("/")[-1].lower().replace("-", "").replace("_", "")
+        variant = next((v for hint, v in QWEN_NAME_HINTS.items() if hint in name), "")
+        size = "0.6B " if "0.6b" in model.id.lower() else "1.7B " if "1.7b" in model.id.lower() else ""
+        label = QWEN_VARIANTS.get(variant, "variant confirmed by Check").lower()
+        return "qwen3", variant, f"Qwen3-TTS {size}· {label}"
+    return None
+
+
+def search_models(query="", engine="all", token=None, limit=40):
+    """Find Hugging Face repos this app can load, most downloaded first."""
+    api = HfApi()
+    expand = ["siblings", "downloads", "likes", "gated", "tags", "lastModified"]
+    query = (query or "").strip()
+    listings = []
+    if engine in ("all", "chatterbox"):
+        listings.append(dict(filter="chatterbox", search=query or None))
+        listings.append(dict(search=query or "chatterbox"))
+    if engine in ("all", "qwen3"):
+        listings.append(dict(filter="qwen3_tts", search=query or None))
+        if query:
+            listings.append(dict(search=query))
+    seen, results = set(), []
+    for kwargs in listings:
+        try:
+            models = api.list_models(sort="downloads", limit=200, expand=expand,
+                                     token=token or None, **kwargs)
+            for model in models:
+                if model.id in seen:
+                    continue
+                seen.add(model.id)
+                classified = _classify(model)
+                if not classified:
+                    continue
+                backend, variant, summary = classified
+                if engine == "chatterbox" and backend == "qwen3" or engine == "qwen3" and backend != "qwen3":
+                    continue
+                tags = {tag.lower() for tag in (model.tags or [])}
+                languages = tuple(sorted(tags & KNOWN_LANGUAGE_TAGS))
+                updated = model.last_modified.strftime("%b %Y") if getattr(model, "last_modified", None) else ""
+                results.append(SearchResult(model.id, backend, summary, model.downloads or 0,
+                                            model.likes or 0, bool(model.gated), languages, updated, variant))
+        except Exception as exc:
+            raise RuntimeError(f"Hugging Face search failed: {exc}") from exc
+    results.sort(key=lambda result: result.downloads, reverse=True)
+    return results[:limit]
 
 
 def whoami(token):

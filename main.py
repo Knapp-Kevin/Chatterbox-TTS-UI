@@ -126,7 +126,8 @@ from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QLabel, QTextEdit, QPushButton, QSlider, QSpinBox,
     QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QGroupBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QPlainTextEdit, QSplitter, QLineEdit,
-    QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget, QLayout
+    QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget, QLayout,
+    QMenu
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
@@ -209,7 +210,12 @@ MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
 PREVIEW_MAX_SECTIONS = 2
 # Initial generation-speed guesses (seconds per character), refined by measurement.
-DEFAULT_SECONDS_PER_CHAR = {"cuda": 0.045, "cpu": 0.35}
+# Initial speed guesses (seconds of generation per character of text) per engine
+# and device; replaced by measurements as each model is used.
+DEFAULT_SECONDS_PER_CHAR = {
+    ("chatterbox", "cuda"): 0.045, ("chatterbox", "cpu"): 0.35,
+    ("qwen3", "cuda"): 0.2, ("qwen3", "cpu"): 2.0,
+}
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
 # every English vowel, diphthong and consonant (including the rarer "zh",
@@ -506,6 +512,7 @@ class AudioGeneratorThread(QThread):
     generation_complete = Signal(str, int)
     error_occurred = Signal(str)
     chunk_generated = Signal(int, int)
+    section_timed = Signal(int, float)  # characters, seconds
 
     def __init__(
         self,
@@ -614,6 +621,7 @@ class AudioGeneratorThread(QThread):
                 self.chunk_generated.emit(current_chunk_num, total_chunks)
                 print(
                     f"\nGenerating chunk {current_chunk_num}/{total_chunks} (seed: {self.actual_seed_used}).")
+                section_started = time.monotonic()
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     wav_tensor_chunk = self.model.generate(
                         chunk_text,
@@ -629,6 +637,7 @@ class AudioGeneratorThread(QThread):
                 if wav_tensor_chunk.ndim == 1:
                     wav_tensor_chunk = wav_tensor_chunk.unsqueeze(0)
                 all_audio_tensors.append(wav_tensor_chunk.cpu())
+                self.section_timed.emit(len(chunk_text), time.monotonic() - section_started)
 
             if self._is_stopped and self.partial_info is None and len(all_audio_tensors) < total_chunks:
                 self.error_occurred.emit("Stopped before final concat.")
@@ -956,6 +965,123 @@ class RecordingDialog(QDialog):
         super().done(result)
 
 
+# --- Hugging Face model search ---
+
+
+class FindModelsDialog(QDialog):
+    """Search Hugging Face for repos this app can load and pick one to add."""
+
+    ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"))
+
+    def __init__(self, token, existing_repos, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Find models on Hugging Face")
+        self.setMinimumSize(640, 460)
+        self.token = token
+        self.existing_repos = existing_repos
+        self.selected_repo = None
+
+        layout = QVBoxLayout(self)
+        intro = QLabel("Only models this app can load are listed. Pick one to add it; nothing "
+                       "downloads until you load it.")
+        intro.setObjectName("Muted")
+        layout.addWidget(intro)
+        search_row = QHBoxLayout()
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("Search by name or language, e.g. norwegian, arabic, 0.6B")
+        self.query_input.returnPressed.connect(self.run_search)
+        search_row.addWidget(self.query_input, 1)
+        self.engine_combo = QComboBox()
+        for label, key in self.ENGINE_FILTERS:
+            self.engine_combo.addItem(label, key)
+        self.engine_combo.currentIndexChanged.connect(lambda _i: self.run_search())
+        search_row.addWidget(self.engine_combo)
+        search_button = QPushButton("Search")
+        search_button.clicked.connect(self.run_search)
+        search_row.addWidget(search_button)
+        layout.addLayout(search_row)
+
+        self.results_list = QListWidget()
+        self.results_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.results_list.itemDoubleClicked.connect(lambda _item: self.use_selected())
+        self.results_list.currentRowChanged.connect(lambda _row: self._update_buttons())
+        layout.addWidget(self.results_list, 1)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("Muted")
+        layout.addWidget(self.status_label)
+
+        buttons = QHBoxLayout()
+        self.open_page_button = QPushButton("Open on Hugging Face")
+        self.open_page_button.clicked.connect(self.open_selected_page)
+        buttons.addWidget(self.open_page_button)
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        self.use_button = QPushButton("Add selected...")
+        self.use_button.setProperty("accent", True)
+        self.use_button.clicked.connect(self.use_selected)
+        buttons.addWidget(self.use_button)
+        layout.addLayout(buttons)
+        self._update_buttons()
+        QTimer.singleShot(0, self.run_search)
+
+    def run_search(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            results = model_registry.search_models(
+                self.query_input.text(), self.engine_combo.currentData(), self.token)
+            error = None
+        except Exception as exc:
+            results, error = [], str(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.results_list.clear()
+        for result in results:
+            details = [result.summary]
+            if result.languages:
+                shown = ", ".join(result.languages[:6]) + (" ..." if len(result.languages) > 6 else "")
+                details.append(shown)
+            details.append(f"{result.downloads:,} downloads")
+            if result.updated:
+                details.append(f"updated {result.updated}")
+            if result.gated:
+                details.append("gated: token and accepted terms needed")
+            added = "   (already in your list)" if result.repo_id in self.existing_repos else ""
+            item = QListWidgetItem(f"{result.repo_id}{added}\n      " + " · ".join(details))
+            item.setData(Qt.ItemDataRole.UserRole, result.repo_id)
+            item.setToolTip(f"{result.repo_id}\n{' · '.join(details)}")
+            self.results_list.addItem(item)
+        if error:
+            self.status_label.setText(error)
+        elif not results:
+            self.status_label.setText("No loadable models found. Try another word or engine.")
+        else:
+            noun = "model" if len(results) == 1 else "models"
+            self.status_label.setText(f"{len(results)} loadable {noun}, most downloaded first.")
+        self._update_buttons()
+
+    def _selected(self):
+        item = self.results_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _update_buttons(self):
+        has = bool(self._selected())
+        self.use_button.setEnabled(has)
+        self.open_page_button.setEnabled(has)
+
+    def open_selected_page(self):
+        repo = self._selected()
+        if repo:
+            QDesktopServices.openUrl(QUrl(f"https://huggingface.co/{repo}"))
+
+    def use_selected(self):
+        self.selected_repo = self._selected()
+        if self.selected_repo:
+            self.accept()
+
+
 # --- Model entry editor ---
 
 
@@ -985,6 +1111,10 @@ class ModelEntryDialog(QDialog):
         self.check_button.setToolTip("Look the repo up on Hugging Face and detect its engine.")
         self.check_button.clicked.connect(self.check_repo)
         repo_row.addWidget(self.check_button)
+        find_button = QPushButton("Find...")
+        find_button.setToolTip("Search Hugging Face for models this app can load.")
+        find_button.clicked.connect(self.find_repo)
+        repo_row.addWidget(find_button)
         form.addRow("Hugging Face repo", repo_row)
         self.check_label = QLabel("Enter a repo and click Check to confirm it can be loaded.")
         self.check_label.setObjectName("Muted")
@@ -1052,6 +1182,16 @@ class ModelEntryDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._engine_changed()
+        if entry.get("repo_id") and not entry.get("label"):
+            QTimer.singleShot(0, self.check_repo)
+
+    def find_repo(self):
+        existing = {e.get("repo_id") for e in self.other_entries}
+        finder = FindModelsDialog(self.token, existing, self)
+        if dialog_accepted(finder.exec()) and finder.selected_repo:
+            self.repo_input.setText(finder.selected_repo)
+            self.name_input.clear()
+            self.check_repo()
 
     def _repo_edited(self, text):
         self.check_label.setText("Click Check to confirm this repo can be loaded.")
@@ -1194,6 +1334,7 @@ class ChatterboxApp(QMainWindow):
             self.update_generation_time_display)  # Renamed for clarity
         self.generation_start_time = None
         self.is_generating = False
+        self.model_is_warm = False
         self.generation_is_preview = False
         self.generation_started_at = None
         self.generation_char_count = 0
@@ -1345,12 +1486,18 @@ class ChatterboxApp(QMainWindow):
 
         text_status_row = QHBoxLayout()
         text_status_row.setSpacing(10)
+        self.estimate_button = self._link(QPushButton())
+        self.estimate_button.setToolTip(
+            "Estimated generation time with the active model. Click to compare every model.")
+        self.estimate_button.clicked.connect(self.show_estimate_menu)
+        self.estimate_button.setVisible(False)
+        text_status_row.addWidget(self.estimate_button)
         self.text_stats_label = QLabel()
         self.text_stats_label.setObjectName("Muted")
         self.text_stats_label.setTextFormat(Qt.TextFormat.PlainText)
         self.text_stats_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.text_stats_label.setToolTip(
-            "Updates as you edit. The time estimate is learned from your previous full renders.")
+            "Updates as you edit. Times are learned per model from the sections you generate.")
         text_status_row.addWidget(self.text_stats_label, 1)
         self.activity_label = QLabel()
         self.activity_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -1701,6 +1848,10 @@ class ChatterboxApp(QMainWindow):
         self.model_active_chip.setObjectName("VoiceChip")
         details_header.addWidget(self.model_active_chip)
         details_header.addStretch(1)
+        find_models_button = self._link(QPushButton("Find models..."))
+        find_models_button.setToolTip("Search Hugging Face for models this app can load.")
+        find_models_button.clicked.connect(self.find_models)
+        details_header.addWidget(find_models_button)
         add_model_button = self._link(QPushButton("+ Add model..."))
         add_model_button.clicked.connect(self.add_model)
         details_header.addWidget(add_model_button)
@@ -2047,6 +2198,7 @@ class ChatterboxApp(QMainWindow):
         self.audio_generator_thread.generation_complete.connect(self.on_generation_complete)
         self.audio_generator_thread.error_occurred.connect(self.on_generation_error)
         self.audio_generator_thread.chunk_generated.connect(self.on_chunk_generated_progress)
+        self.audio_generator_thread.section_timed.connect(self.on_section_timed)
         self.audio_generator_thread.finished.connect(self.on_generation_thread_finished)
         self.audio_generator_thread.start()
 
@@ -2087,24 +2239,105 @@ class ChatterboxApp(QMainWindow):
             self.document_label.clear()
         self.text_stats_timer.start()
 
-    def seconds_per_char(self):
-        measured = self.app_settings.get("seconds_per_char", {}).get(self.device_used)
-        return measured or DEFAULT_SECONDS_PER_CHAR.get(self.device_used, 0.35)
+    def speed_device(self):
+        if self.model is not None:
+            return self.device_used
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def speed_key(self, entry):
+        variant = entry.get("qwen_variant") or entry.get("multilingual_t3_model") or ""
+        return f"{self.speed_device()}|{entry.get('repo_id')}|{entry.get('backend')}|{variant}"
+
+    def seconds_per_char_for(self, entry):
+        """(seconds per character, measured?) for an entry on the current device."""
+        device = self.speed_device()
+        measured = self.app_settings.get("speed_by_model", {}).get(self.speed_key(entry))
+        if measured:
+            return measured, True
+        engine = "qwen3" if entry.get("backend") == QWEN_BACKEND else "chatterbox"
+        if engine == "chatterbox":
+            legacy = self.app_settings.get("seconds_per_char", {}).get(device)  # older single rate
+            if legacy:
+                return legacy, False
+        return DEFAULT_SECONDS_PER_CHAR.get((engine, device), 0.35), False
+
+    def loaded_entry(self):
+        return next((e for e in self.model_entries if self.entry_key(e) == self.loaded_entry_key()), None)
+
+    def model_estimates(self, characters):
+        """[(entry, seconds, measured, active)] for every model in the switcher, fastest first."""
+        rows = []
+        active_key = self.loaded_entry_key() if self.model is not None else None
+        for entry in self.get_visible_model_entries():
+            rate, measured = self.seconds_per_char_for(entry)
+            rows.append((entry, characters * rate, measured, self.entry_key(entry) == active_key))
+        return sorted(rows, key=lambda row: row[1])
 
     def update_text_stats(self):
         # Always current, including while a preview or render runs; a running
         # render keeps using the text it started with.
         text = self.text_input.toPlainText().strip()
         if not text:
+            self.estimate_button.setVisible(False)
             self.text_stats_label.setText("Type or paste text, or open a document.")
             return
         sections = len(documents.split_into_sections(text))
-        estimate = self.format_duration(len(text) * self.seconds_per_char())
-        # Estimate first so it survives truncation in narrow windows.
-        parts = [f"About {estimate}",
-                 f"{sections} section{'s' if sections != 1 else ''}",
-                 f"{len(text):,} characters"]
-        self.text_stats_label.setText(" \u00b7 ".join(parts))
+        entry = self.loaded_entry() or self.get_selected_model_entry()
+        rate, measured = self.seconds_per_char_for(entry)
+        self.estimate_button.setText(f"About {self.format_duration(len(text) * rate)} \u25be")
+        self.estimate_button.setVisible(True)
+        self.text_stats_label.setText(
+            f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters")
+        for index in range(self.model_repo_combo.count()):
+            visible = self.get_visible_model_entries()
+            if index < len(visible):
+                item_rate, item_measured = self.seconds_per_char_for(visible[index])
+                self.model_repo_combo.setItemData(
+                    index,
+                    f"About {self.format_duration(len(text) * item_rate)} for the current text"
+                    f" ({'measured' if item_measured else 'estimate'})",
+                    Qt.ItemDataRole.ToolTipRole)
+
+    def show_estimate_menu(self):
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            return
+        menu = QMenu(self)
+        header = menu.addAction(f"Time for this text ({len(text):,} characters), by model")
+        header.setEnabled(False)
+        menu.addSeparator()
+        for entry, seconds, measured, active in self.model_estimates(len(text)):
+            marker = "\u25cf " if active else "    "
+            label = f"{marker}{entry['label']}  \u2014  about {self.format_duration(seconds)}"
+            label += "" if measured else "  (estimate)"
+            if not active:
+                label += "  + load"
+            action = menu.addAction(label)
+            action.setEnabled(not active and not self.is_generating and not getattr(self, "model_is_loading", False))
+            action.triggered.connect(lambda _checked=False, e=entry: self.switch_to_entry(e))
+        menu.addSeparator()
+        note = menu.addAction("Estimates become measurements once a model has generated a few sections.")
+        note.setEnabled(False)
+        menu.exec(self.estimate_button.mapToGlobal(self.estimate_button.rect().bottomLeft()))
+
+    def switch_to_entry(self, entry):
+        index = self.model_repo_combo.findText(entry["label"])
+        if index >= 0:
+            self.model_repo_combo.setCurrentIndex(index)
+
+    def on_section_timed(self, characters, seconds):
+        # The first section after a load includes warm-up, so it isn't a fair sample.
+        if not self.model_is_warm:
+            self.model_is_warm = True
+            return
+        entry = self.loaded_entry()
+        if entry is None or characters < 20:
+            return
+        measured = seconds / characters
+        rates = self.app_settings.setdefault("speed_by_model", {})
+        key = self.speed_key(entry)
+        previous = rates.get(key)
+        rates[key] = round(measured if previous is None else 0.7 * previous + 0.3 * measured, 5)
 
     @staticmethod
     def format_clock(seconds):
@@ -2122,15 +2355,6 @@ class ChatterboxApp(QMainWindow):
             return f"{minutes} min {seconds:02d} s" if minutes < 10 else f"{minutes} min"
         hours, minutes = divmod(minutes, 60)
         return f"{hours} h {minutes:02d} min"
-
-    def record_generation_speed(self):
-        if not self.generation_started_at or not self.generation_char_count:
-            return
-        elapsed = time.monotonic() - self.generation_started_at
-        measured = elapsed / self.generation_char_count
-        rates = self.app_settings.setdefault("seconds_per_char", {})
-        previous = rates.get(self.device_used)
-        rates[self.device_used] = round(measured if previous is None else 0.6 * previous + 0.4 * measured, 5)
 
     def _create_slider(self, min_val, max_val, step_val, default_val, value_format="{:.2f}"):
         return SliderWithValue(min_val, max_val, step_val, default_val, value_format)
@@ -2489,8 +2713,7 @@ class ChatterboxApp(QMainWindow):
         select_row = 0
         for row, entry in enumerate(self.model_entries):
             engine = model_registry.engine_for(entry)
-            languages = (engine.languages_summary
-                         if entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND) else "English")
+            languages = engine.languages_summary
             engine_text = model_registry.engine_label(entry)
             if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
                 status = "engine not installed"
@@ -2584,6 +2807,15 @@ class ChatterboxApp(QMainWindow):
         if not dialog_accepted(dialog.exec()):
             return None
         return dialog.result_entry()
+
+    def find_models(self):
+        existing = {e.get("repo_id") for e in self.model_entries}
+        finder = FindModelsDialog(self.app_settings.get("hf_token"), existing, self)
+        if not dialog_accepted(finder.exec()) or not finder.selected_repo:
+            return
+        new_entry = self._edit_entry_dialog({"repo_id": finder.selected_repo})
+        if new_entry:
+            self.persist_model_entries(self.model_entries + [new_entry], new_entry)
 
     def add_model(self):
         new_entry = self._edit_entry_dialog(None)
@@ -2895,6 +3127,7 @@ class ChatterboxApp(QMainWindow):
         self.model_loader_thread.start()
 
     def on_model_loaded(self, model_instance, device_used):
+        self.model_is_warm = False
         self.model = model_instance
         self.device_used = device_used
         status_message = (
@@ -2941,11 +3174,6 @@ class ChatterboxApp(QMainWindow):
             self.generation_timer.stop()
 
         # Reset UI elements
-        thread = getattr(self, "audio_generator_thread", None)
-        completed_fully = (thread is not None and not thread.preview
-                           and thread.partial_info is None and not thread._is_stopped)
-        if completed_fully and self.generation_progress.value() == self.generation_progress.maximum():
-            self.record_generation_speed()
         self.is_generating = False
         self.generate_button.setText("Generate Audio")
         self.generate_button.setEnabled(True)
