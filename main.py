@@ -816,18 +816,12 @@ class RecordingDialog(QDialog):
 
         self.phase_label = QLabel("Get ready...")
         self.phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        phase_font = QFont(self.phase_label.font())
-        phase_font.setPointSize(phase_font.pointSize() + 2)
-        phase_font.setBold(True)
-        self.phase_label.setFont(phase_font)
+        self.phase_label.setObjectName("RecordingPhase")
         layout.addWidget(self.phase_label)
 
         self.big_label = QLabel(str(self.COUNTDOWN_SECONDS))
         self.big_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        big_font = QFont(self.big_label.font())
-        big_font.setPointSize(big_font.pointSize() + 18)
-        big_font.setBold(True)
-        self.big_label.setFont(big_font)
+        self.big_label.setObjectName("RecordingClock")
         layout.addWidget(self.big_label)
 
         self.hint_label = QLabel(
@@ -845,9 +839,7 @@ class RecordingDialog(QDialog):
         self.script_label.setTextFormat(Qt.TextFormat.PlainText)
         self.script_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        script_font = QFont(self.script_label.font())
-        script_font.setPointSize(script_font.pointSize() + 3)
-        self.script_label.setFont(script_font)
+        self.script_label.setObjectName("ReadAloud")
         script_layout.addWidget(self.script_label)
         script_footer = QHBoxLayout()
         script_note = QLabel("Read with natural expression. Any language works.")
@@ -2073,9 +2065,7 @@ class ChatterboxApp(QMainWindow):
         self.console_log_view.setReadOnly(True)
         self.console_log_view.setMaximumBlockCount(1000)
         self.console_log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        log_font = QFont("Consolas")
-        log_font.setStyleHint(QFont.StyleHint.Monospace)
-        self.console_log_view.setFont(log_font)
+        self.console_log_view.setObjectName("LogView")
         log_layout.addWidget(self.console_log_view, 1)
         self.pages.addWidget(log_page)
 

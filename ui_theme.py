@@ -265,6 +265,10 @@ def _stylesheet(c):
     QLabel#PageSubtitle, QLabel#Muted {{ color: {c['muted']}; }}
     QFrame#Card {{ background: transparent; border: none; }}
     QLabel#CardTitle {{ font-weight: 700; font-size: 10.5pt; }}
+    QLabel#RecordingPhase {{ font-size: 12pt; font-weight: 700; }}
+    QLabel#RecordingClock {{ font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 28pt; font-weight: 700; }}
+    QLabel#ReadAloud {{ font-size: 12.5pt; }}
+    QPlainTextEdit#LogView {{ font-family: "Cascadia Mono", Consolas, monospace; font-size: 9.5pt; }}
     QLabel#Note {{
         background: {c['accent_soft']}; border-left: 3px solid {c['accent']};
         border-radius: 6px; padding: 8px 10px; color: {c['text']};

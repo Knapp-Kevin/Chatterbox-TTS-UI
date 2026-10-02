@@ -45,8 +45,16 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         cuda = torch.cuda.is_available()
+        # Load from the local cache when the model is already downloaded, so loading
+        # (and therefore generation) works offline; qwen-tts otherwise asks the Hub for
+        # the latest revision and fails without a connection.
+        try:
+            from huggingface_hub import snapshot_download
+            source = snapshot_download(model_id, local_files_only=True)
+        except Exception:
+            source = model_id  # not cached yet: download it
         model = Qwen3TTSModel.from_pretrained(
-            model_id,
+            source,
             device_map="cuda:0" if cuda else "cpu",
             dtype=torch.bfloat16 if cuda else torch.float32,
             attn_implementation="sdpa",
