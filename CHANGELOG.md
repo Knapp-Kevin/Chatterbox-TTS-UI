@@ -25,6 +25,8 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - Add, edit, duplicate, hide and remove models.
   - **Check** a Hugging Face repo before downloading.
   - **Find models** searches Hugging Face for repos this app can load.
+  - **Model page tabs and tiles.** Tabs for voice cloning, preset voices and voice design. Your models show as tiles with download status, typical speed and a **license badge** (permissive, non-commercial or unclear). Click a tile to load it.
+  - **Discover on Hugging Face** lists more loadable models for each tab, searched in the background. Click one to add it.
 - **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
 - **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
 - **Advanced page:** speed and pitch changes (formant-preserving) and MP3 export, with a note that they can weaken the AI watermark.

@@ -46,6 +46,9 @@ LIGHT = {
     "edge_highlight": "#ffffff",
     "grain_color": "#3a2f22",
     "grain_alpha": 10,
+    # license badges
+    "good_bg": "#e2f1df", "good_text": "#2d6a28",
+    "bad_bg": "#f9e0dd", "bad_text": "#8f2a21",
 }
 
 DARK = {
@@ -79,6 +82,8 @@ DARK = {
     "edge_highlight": "#ffffff14",
     "grain_color": "#ffffff",
     "grain_alpha": 7,
+    "good_bg": "#203522", "good_text": "#93d28c",
+    "bad_bg": "#3c2321", "bad_text": "#f09d93",
 }
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -277,6 +282,42 @@ def _stylesheet(c):
         background: {chip}; border: 1px solid {c['accent_soft']}; border-bottom-color: {c['border_strong']};
         border-radius: 12px; padding: 4px 12px; font-weight: 600;
     }}
+
+    QFrame#Tile {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {c['surface_top']}, stop:1 {c['surface_bottom']});
+        border: 1px solid {c['border']}; border-bottom-color: {c['border_strong']}; border-radius: 10px;
+    }}
+    QFrame#Tile:hover {{ border-color: {c['accent']}; }}
+    QFrame#Tile[active="true"] {{
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {c['accent_soft']}, stop:1 {c['surface_bottom']});
+        border: 2px solid {c['accent']};
+    }}
+    QLabel#TileTitle {{ font-weight: 700; }}
+    QPushButton#TileMenu {{
+        background: transparent; border: none; border-radius: 5px; padding: 0; font-size: 12pt; color: {c['muted']};
+    }}
+    QPushButton#TileMenu:hover {{ background: {c['accent_soft']}; color: {c['text']}; }}
+    QLabel#Badge {{
+        border-radius: 8px; padding: 1px 7px; font-size: 8.5pt; font-weight: 600;
+        background: {c['surface_alt']}; color: {c['muted']}; border: 1px solid {c['border']};
+    }}
+    QLabel#Badge[kind="permissive"] {{ background: {c['good_bg']}; color: {c['good_text']}; border-color: {c['good_bg']}; }}
+    QLabel#Badge[kind="noncommercial"] {{ background: {c['bad_bg']}; color: {c['bad_text']}; border-color: {c['bad_bg']}; }}
+    QLabel#Badge[kind="unknown"] {{ background: {c['accent_soft']}; color: {c['text']}; border-color: {c['accent_soft']}; }}
+    QLabel#Badge[kind="active"] {{ background: {accent}; color: {c['accent_text']}; border-color: {c['accent_bottom']}; }}
+    QTabBar#CapabilityTabs {{ font-size: 10.5pt; }}
+    QTabBar#CapabilityTabs::tab {{
+        background: transparent; border: none; border-bottom: 2px solid transparent;
+        padding: 6px 10px 7px 10px; margin-right: 2px; color: {c['muted']};
+    }}
+    QTabBar#CapabilityTabs::tab:hover {{ color: {c['text']}; }}
+    QTabBar#CapabilityTabs::tab:selected {{ color: {c['text']}; border-bottom-color: {c['accent']}; font-weight: 600; }}
+    QScrollArea#TileArea QScrollBar:vertical {{ background: transparent; width: 8px; margin: 0; }}
+    QScrollArea#TileArea QScrollBar::handle:vertical {{ background: {c['border_strong']}; border-radius: 4px; min-height: 28px; }}
+    QScrollArea#TileArea QScrollBar::handle:vertical:hover {{ background: {c['accent']}; }}
+    QScrollArea#TileArea QScrollBar::add-line, QScrollArea#TileArea QScrollBar::sub-line,
+    QScrollArea#TileArea QScrollBar::add-page, QScrollArea#TileArea QScrollBar::sub-page {{ height: 0; background: none; }}
+    QLabel#SectionLabel {{ color: {c['muted']}; font-size: 8.5pt; font-weight: 700; letter-spacing: 1px; }}
 
     QPushButton {{
         background: {button}; border: 1px solid {c['border']}; border-bottom-color: {c['border_strong']};

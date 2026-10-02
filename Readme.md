@@ -39,16 +39,16 @@ Windows remains the primary maintained path.
 | **Rendering a document** | **Voice** |
 | ![Long render in progress with section range and time remaining](docs/screenshots/generate_progress.png) | ![Voice page with current voice, microphone recording and saved recordings](docs/screenshots/voice.png) |
 | **Model** | **Advanced** |
-| ![Model page with models grouped by voice cloning, preset voices and voice design](docs/screenshots/model.png) | ![Advanced page with speed, pitch and MP3 export](docs/screenshots/advanced.png) |
-| **Recording a reference clip** | **Find models on Hugging Face** |
-| ![Recording window with read-aloud passage, timer and level meter](docs/screenshots/recording.png) | ![Find models dialog listing loadable Hugging Face repos](docs/screenshots/find_models.png) |
+| ![Model page with tabs for voice cloning, preset voices and voice design, and model tiles](docs/screenshots/model.png) | ![Advanced page with speed, pitch and MP3 export](docs/screenshots/advanced.png) |
+| **Recording a reference clip** | **Discover models on Hugging Face** |
+| ![Recording window with read-aloud passage, timer and level meter](docs/screenshots/recording.png) | ![Discover tiles listing loadable Hugging Face models with license badges](docs/screenshots/discover.png) |
 
 ## What's New in This Fork
 
 *   **Two engines, grouped by what they do.** Chatterbox (23 languages, fast voice cloning) plus optional Qwen3-TTS (preset voices with style instructions, voice design from a written description, and voice cloning).
 *   **Record your own voice in the app.** A guided recording window: countdown, live level meter, too-quiet and clipping warnings, and a phonetically rich passage to read.
 *   **Narrate whole documents.** Open `.txt`, `.md` or `.docx`, preview a sample first, see a time estimate for every model, and follow progress with time remaining. Sections are split where a reader would pause, never mid-phrase or across paragraphs.
-*   **Manage models without editing files.** Search Hugging Face for compatible models, check a repo before downloading it, and add, edit or hide models from the Model page.
+*   **Manage models without editing files.** Browse compatible Hugging Face models by what they do, see each one's license at a glance, check a repo before downloading it, and add, edit or hide models from the Model page.
 *   **A calmer, clearer interface.** Sidebar pages, plain-language controls, and a light/dark theme that follows Windows. The window sizes itself so nothing ever needs scrolling.
 
 ## Features
@@ -102,9 +102,13 @@ Windows remains the primary maintained path.
 
 ### Model
 
-*   **Every model** with its engine, languages and download status, grouped by capability. Details for the selected model, with **Load this model**, **Edit…**, **Duplicate** and **Remove**. Removing a model keeps its downloaded files.
-*   **+ Add model…**: enter a Hugging Face repo and click **Check**. Before anything downloads, it confirms the repo exists, which engine can load it, its download size, and whether it's public, gated or private. Saving writes `models.json` for you.
-*   **Find models…** searches Hugging Face and lists only repos this app can load: Chatterbox layouts and Qwen3-TTS speech models. MLX, GGUF, ONNX, OpenVINO and Core ML conversions are filtered out. Results show languages, downloads and last update.
+*   **Tabs by capability:** **Voice cloning**, **Preset voices** and **Voice design**.
+*   **Your models** as tiles: name, engine, languages and the typical time for 1,000 characters (learned from your own runs). Each tile has two badges:
+    *   **Status:** Loaded, Ready (with its cached size), Download (with its size), or Needs engine.
+    *   **License:** green for permissive licenses such as MIT or Apache 2.0, red for non-commercial, amber when unclear. Always read the model card before commercial use.
+*   **Click a tile to load it.** Right-click or **⋯** for **Edit…**, **Duplicate…**, **Hide from model switcher**, **Open on Hugging Face** and **Remove…**. Removing a model keeps its downloaded files.
+*   **Discover on Hugging Face** lists models this app can load for the current tab, most downloaded first, skipping ones you already have. Search by name or language. MLX, GGUF, ONNX, OpenVINO and Core ML conversions are filtered out. Click a tile to add it; nothing downloads until you load it.
+*   **+ Add repo…**: enter a Hugging Face repo and click **Check**. Before anything downloads, it confirms the repo exists, which engine can load it, its license, its download size, and whether it's public, gated or private. Saving writes `models.json` for you.
 *   **Hugging Face access:** a token field with **Save** and **Test**. The token is stored only in `app_settings.json` on your computer, never in `models.json`. It's only needed for gated or private repos, or for higher download limits.
 *   **Fine-tuning:** repetition control, the unlikely-sound filter (min-p) and top-p. Remembered between sessions.
 
@@ -144,7 +148,7 @@ Windows remains the primary maintained path.
 *   **Chatterbox original (single language):** the older layout. It speaks English with the official weights, or the language a community fine-tune was trained on (for example Norwegian or Indonesian).
 *   **Qwen3-TTS:** `en`, `zh`, `ja`, `ko`, `de`, `fr`, `ru`, `pt`, `es`, `it`.
 *   **Bulgarian** isn't in the official Chatterbox language list.
-*   Use **Find models…** to look for community fine-tunes in other languages. Not every Hugging Face repo is loadable; **Check** tells you before anything downloads.
+*   Use **Discover** on the Model page (search a language name) to look for community fine-tunes in other languages. Not every Hugging Face repo is loadable; **Check** tells you before anything downloads.
 </details>
 
 ## Prerequisites
@@ -185,7 +189,7 @@ Windows remains the primary maintained path.
 4.  **Clone a voice:** on the **Voice** page, pick a microphone and click **Record...**, or **Browse for a file...**. The selected clip is used by the Voice cloning models.
     *   Chatterbox relies mostly on the first 6–10 seconds of a clip, so start speaking right away and keep the room quiet.
 5.  **Try Qwen (optional):** pick **Qwen3 preset voices**, **Qwen3 voice design** or **Qwen3 voice cloning** in the model switcher. The first time, the app offers to install the Qwen engine. Each model downloads the first time you use it.
-6.  **Add more models:** on the **Model** page, use **Find models…** or **+ Add model…** with **Check**.
+6.  **Add more models:** on the **Model** page, click a tile under **Discover**, or use **+ Add repo…** with **Check**.
 7.  **Hugging Face token (optional):** create a token with `Read` access at [Hugging Face Settings > Access Tokens](https://huggingface.co/settings/tokens). Paste it under **Hugging Face access** on the Model page, then click **Save** and **Test**. It's only needed for gated or private repos, or for higher download limits.
 </details>
 
@@ -237,7 +241,8 @@ The optional Qwen engine installs itself into `engines/qwen/.venv` from inside t
 *   `launch_app.py`: startup wrapper that logs pre-window crashes to `logs/app_startup_*.log`.
 *   `install_torch.py`: detects CUDA and installs a matching PyTorch build.
 *   `model_backends.py`: loads Chatterbox models.
-*   `model_registry.py`: engine definitions, capability groups, `models.json` saving, download status, the Hugging Face **Check**, and **Find models** search.
+*   `model_registry.py`: engine definitions, capability groups, `models.json` saving, download status, license badges, the Hugging Face **Check**, and model search.
+*   `model_tiles.py`: the Model page tiles, tile grid and background Hugging Face search.
 *   `qwen_engine.py` / `engines/qwen/qwen_worker.py`: the Qwen3-TTS engine. The worker runs inside `engines/qwen/.venv`.
 *   `documents.py`: document loading, paragraph-aware sectioning and batch planning.
 *   `audio_effects.py`: finishing touches, seam-aware joining, speed and pitch, and WAV/FLAC/MP3 export.

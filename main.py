@@ -127,7 +127,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QGroupBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QPlainTextEdit, QSplitter, QLineEdit,
     QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget, QLayout,
-    QMenu
+    QMenu, QTabBar
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
@@ -140,6 +140,8 @@ import audio_effects
 import documents
 import model_registry
 import qwen_engine
+import model_tiles
+import math
 import gc
 import time
 from collections import deque
@@ -374,8 +376,14 @@ def load_models_config(config_path):
                 preset_value = str(preset_text).strip()
                 if language_key and preset_value:
                     normalized_test_texts[language_key] = preset_value
+        optional = {}
+        if str(item.get("license", "")).strip():
+            optional["license"] = str(item["license"]).strip().lower()
+        if isinstance(item.get("download_bytes"), int) and item["download_bytes"] > 0:
+            optional["download_bytes"] = item["download_bytes"]
         normalized_models.append(
             {
+                **optional,
                 "repo_id": repo_id,
                 "label": label,
                 "enabled": bool(item.get("enabled", True)),
@@ -1121,6 +1129,7 @@ class ModelEntryDialog(QDialog):
         self.other_entries = other_entries
         self.token = token
         self.original = dict(entry or {})
+        self.checked = {}
         entry = dict(entry or {"backend": "multilingual", "multilingual_t3_model": "v3",
                                "enabled": True, "language_id": "en"})
 
@@ -1247,6 +1256,9 @@ class ModelEntryDialog(QDialog):
         self.check_label.setStyleSheet("color: #3c9a3c;" if result.ok else "color: #d9534f;")
         self.adjustSize()
         if result.ok:
+            self.checked = {"download_bytes": result.download_bytes}
+            if result.license:
+                self.checked["license"] = result.license
             self.engine_combo.setCurrentIndex(self.engine_combo.findData(result.detected_backend))
             if result.qwen_variant:
                 self.variant_combo.setCurrentIndex(self.variant_combo.findData(result.qwen_variant))
@@ -1272,6 +1284,11 @@ class ModelEntryDialog(QDialog):
             "qwen_variant": self.variant_combo.currentData() if engine == QWEN_BACKEND else "",
             "test_texts": entry.get("test_texts", {}),
         })
+        if self.repo_input.text().strip() == self.original.get("repo_id") or self.checked:
+            entry.update(self.checked)
+        else:
+            entry.pop("license", None)  # a different repo: don't keep the old one's license
+            entry.pop("download_bytes", None)
         return entry
 
     def _save(self):
@@ -1396,7 +1413,6 @@ class ChatterboxApp(QMainWindow):
         else:
             self.set_status_message("Status: Chatterbox library not found.")
             self.generate_button.setEnabled(False)
-            self.load_model_button.setEnabled(False)
 
     PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_ADVANCED, PAGE_LOG = range(5)
 
@@ -1473,6 +1489,7 @@ class ChatterboxApp(QMainWindow):
         sidebar_layout.addWidget(self.sidebar)
         self.pages = QStackedWidget()
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.sidebar.currentRowChanged.connect(self.on_page_changed)
         content_area = ui_theme.TexturedArea()
         content_layout = QVBoxLayout(content_area)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -1861,68 +1878,60 @@ class ChatterboxApp(QMainWindow):
         # ---------- Model page ----------
         model_page, model_layout = self._make_page(
             "Model", "Models download once, then load from the local cache.")
-        models_card, models_layout = self._make_card("Models")
-        self.models_list = QListWidget()
-        self.models_list.setMinimumHeight(96)
-        self.models_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.models_list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self.models_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.models_list.currentRowChanged.connect(lambda _row: self.update_model_details())
-        self.models_list.itemDoubleClicked.connect(lambda _item: self.load_selected_list_model())
-        models_layout.addWidget(self.models_list, 1)
-
-        details_header = QHBoxLayout()
-        self.model_name_label = QLabel()
-        self.model_name_label.setObjectName("CardTitle")
-        self.model_name_label.setTextFormat(Qt.TextFormat.PlainText)
-        details_header.addWidget(self.model_name_label)
-        self.model_active_chip = QLabel("Active")
-        self.model_active_chip.setObjectName("VoiceChip")
-        details_header.addWidget(self.model_active_chip)
-        details_header.addStretch(1)
-        find_models_button = self._link(QPushButton("Find models..."))
-        find_models_button.setToolTip("Search Hugging Face for models this app can load.")
-        find_models_button.clicked.connect(self.find_models)
-        details_header.addWidget(find_models_button)
-        add_model_button = self._link(QPushButton("+ Add model..."))
+        models_card, models_layout = self._make_card()
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(6)
+        self.capability_tabs = QTabBar()
+        self.capability_tabs.setObjectName("CapabilityTabs")
+        self.capability_tabs.setDrawBase(False)
+        self.capability_tabs.setExpanding(False)
+        self.capability_tabs.setUsesScrollButtons(False)
+        self.capability_tabs.setCursor(Qt.CursorShape.PointingHandCursor)
+        for key, (title, description) in model_registry.CAPABILITIES.items():
+            index = self.capability_tabs.addTab(title)
+            self.capability_tabs.setTabData(index, key)
+            self.capability_tabs.setTabToolTip(index, description)
+        self.capability_tabs.currentChanged.connect(lambda _index: self.render_model_tiles())
+        tabs_row.addWidget(self.capability_tabs)
+        tabs_row.addStretch(1)
+        add_model_button = self._link(QPushButton("+ Add repo..."))
+        add_model_button.setToolTip("Add a Hugging Face repo you already know, e.g. owner/model-name.")
         add_model_button.clicked.connect(self.add_model)
-        details_header.addWidget(add_model_button)
-        models_layout.addLayout(details_header)
-        details_grid = QGridLayout()
-        details_grid.setHorizontalSpacing(14)
-        details_grid.setColumnStretch(1, 1)
-        self.model_engine_label = QLabel()
-        self.model_repo_label = QLabel()
-        self.model_repo_label.setOpenExternalLinks(True)
-        self.model_status_label = QLabel()
-        # Long notes are clipped (full text in the tooltip) instead of widening the window.
-        for label in (self.model_engine_label, self.model_repo_label, self.model_status_label):
-            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        for row, (title, widget) in enumerate((
-                ("Engine", self.model_engine_label),
-                ("Repo", self.model_repo_label),
-                ("Status", self.model_status_label))):
-            caption = QLabel(title)
-            caption.setObjectName("Muted")
-            details_grid.addWidget(caption, row, 0)
-            details_grid.addWidget(widget, row, 1)
-        models_layout.addLayout(details_grid)
-        model_actions = QHBoxLayout()
-        self.load_model_button = self._accent(QPushButton("Load this model"))
-        self.load_model_button.clicked.connect(self.load_selected_list_model)
-        model_actions.addWidget(self.load_model_button)
-        model_actions.addStretch(1)
-        self.edit_model_button = QPushButton("Edit...")
-        self.edit_model_button.clicked.connect(self.edit_model)
-        self.duplicate_model_button = QPushButton("Duplicate")
-        self.duplicate_model_button.setToolTip("Copy this entry, e.g. to try other weights or a default language.")
-        self.duplicate_model_button.clicked.connect(self.duplicate_model)
-        self.remove_model_button = QPushButton("Remove")
-        self.remove_model_button.setToolTip("Remove from the list. Downloaded files stay in the cache.")
-        self.remove_model_button.clicked.connect(self.remove_model)
-        for button in (self.edit_model_button, self.duplicate_model_button, self.remove_model_button):
-            model_actions.addWidget(button)
-        models_layout.addLayout(model_actions)
+        tabs_row.addWidget(add_model_button)
+        models_layout.addLayout(tabs_row)
+        self.capability_note = QLabel()
+        self.capability_note.setObjectName("Muted")
+        self.capability_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        models_layout.addWidget(self.capability_note)
+
+        your_label = QLabel("YOUR MODELS")
+        your_label.setObjectName("SectionLabel")
+        your_label.setToolTip("Click a model to load it. Right-click or \u22ef for edit, hide and remove.")
+        models_layout.addWidget(your_label)
+        self.your_tiles = model_tiles.TileArea(min_rows=1)
+        models_layout.addWidget(self.your_tiles, 3)
+
+        discover_row = QHBoxLayout()
+        discover_label = QLabel("DISCOVER ON HUGGING FACE")
+        discover_label.setObjectName("SectionLabel")
+        discover_row.addWidget(discover_label)
+        discover_row.addStretch(1)
+        self.discover_input = QLineEdit()
+        self.discover_input.setPlaceholderText("Search, e.g. norwegian, arabic, 0.6B")
+        self.discover_input.setClearButtonEnabled(True)
+        self.discover_input.setFixedWidth(210)
+        self.discover_input.returnPressed.connect(self.start_discover)
+        discover_row.addWidget(self.discover_input)
+        discover_button = QPushButton("Search")
+        discover_button.clicked.connect(self.start_discover)
+        discover_row.addWidget(discover_button)
+        models_layout.addLayout(discover_row)
+        self.discover_tiles = model_tiles.TileArea(min_rows=1)
+        models_layout.addWidget(self.discover_tiles, 2)
+        self.discover_status = QLabel()
+        self.discover_status.setObjectName("Muted")
+        self.discover_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        models_layout.addWidget(self.discover_status)
         model_layout.addWidget(models_card, 1)
 
         hf_card, hf_layout = self._make_card("Hugging Face access")
@@ -2272,7 +2281,6 @@ class ChatterboxApp(QMainWindow):
         self.generate_button.setEnabled(True)
         self.preview_button.setEnabled(False)
         self.open_document_button.setEnabled(False)
-        self.load_model_button.setEnabled(False)
         self.model_repo_combo.setEnabled(False)
         self.generation_progress.setValue(0)
         self.generation_progress.setVisible(True)
@@ -2892,108 +2900,205 @@ class ChatterboxApp(QMainWindow):
         return (self.current_model_repo, backend, weights or "")
 
     def refresh_models_page(self, select_entry=None):
-        if not hasattr(self, "models_list"):
+        if not hasattr(self, "capability_tabs"):
             return
-        previous = select_entry or self.selected_list_entry()
-        sizes = model_registry.cached_repo_sizes()
-        self.models_list.blockSignals(True)
-        self.models_list.clear()
-        select_row = None
-        first_entry_row = None
-        header_font = QFont(self.models_list.font())
-        header_font.setBold(True)
-        ordered = []
-        for capability, title, members in model_registry.group_by_capability(self.model_entries):
-            ordered.append((None, (title, model_registry.CAPABILITIES[capability][1])))
-            ordered.extend((self.model_entries.index(entry), entry) for entry in members)
-        for row, entry in ordered:
-            if row is None:
-                title, description = entry
-                header = QListWidgetItem(title.upper())
-                header.setFlags(Qt.ItemFlag.NoItemFlags)
-                header.setFont(header_font)
-                header.setForeground(QApplication.palette().color(QPalette.ColorRole.Link))
-                header.setToolTip(description)
-                self.models_list.addItem(header)
-                continue
-            engine = model_registry.engine_for(entry)
-            languages = engine.languages_summary
-            engine_text = model_registry.engine_label(entry)
-            if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
-                status = "engine not installed"
-            elif model_registry.is_downloaded(entry):
-                status = f"downloaded ({model_registry.format_size(sizes.get(entry['repo_id'], 0))} repo cache)"
-            else:
-                status = "not downloaded"
-            active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
-            hidden = "" if entry.get("enabled", True) else " \u00b7 hidden"
-            marker = "  \u25cf " if active else "      "
-            item = QListWidgetItem(f"{marker}{entry['label']}\n      {engine_text} \u00b7 {languages} \u00b7 {status}{hidden}")
-            item.setData(Qt.ItemDataRole.UserRole, row)
-            item.setToolTip(f"{entry['repo_id']}\n{engine_text} \u00b7 {languages} \u00b7 {status}"
-                            + ("\nHidden from the model switcher" if hidden else ""))
-            entry["_status"] = status
-            if active:
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.models_list.addItem(item)
-            list_row = self.models_list.count() - 1
-            if first_entry_row is None:
-                first_entry_row = list_row
-            if previous is not None and self.entry_key(entry) == self.entry_key(previous) \
-                    and entry.get("label") == previous.get("label"):
-                select_row = list_row
-        self.models_list.setCurrentRow(select_row if select_row is not None else (first_entry_row or 0))
-        self.models_list.blockSignals(False)
-        self.update_model_details()
+        self.model_cache_sizes = model_registry.cached_repo_sizes()
+        if select_entry is not None:
+            self.show_capability(model_registry.capability_for(select_entry))
+        self.render_model_tiles()
 
-    def selected_list_entry(self):
-        if not hasattr(self, "models_list"):
-            return None
-        item = self.models_list.currentItem()
-        if item is None:
-            return None
-        row = item.data(Qt.ItemDataRole.UserRole)
-        return self.model_entries[row] if isinstance(row, int) and row < len(self.model_entries) else None
+    def show_capability(self, capability):
+        for index in range(self.capability_tabs.count()):
+            if self.capability_tabs.tabData(index) == capability:
+                self.capability_tabs.setCurrentIndex(index)  # renders via currentChanged
+
+    def current_capability(self):
+        return self.capability_tabs.tabData(self.capability_tabs.currentIndex())
+
+    def on_page_changed(self, page):
+        if page == self.PAGE_MODEL and getattr(self, "discover_results", None) is None \
+                and getattr(self, "discover_thread", None) is None:
+            self.start_discover()
+
+    def is_active_entry(self, entry):
+        return self.model is not None and self.entry_key(entry) == self.loaded_entry_key()
+
+    def model_busy(self):
+        return getattr(self, "model_is_loading", False) or self.is_generating
+
+    def render_model_tiles(self):
+        if not hasattr(self, "capability_tabs"):
+            return
+        if getattr(self, "model_cache_sizes", None) is None:
+            self.model_cache_sizes = model_registry.cached_repo_sizes()
+        groups = {capability: members for capability, _title, members
+                  in model_registry.group_by_capability(self.model_entries)}
+        for index in range(self.capability_tabs.count()):
+            capability = self.capability_tabs.tabData(index)
+            title = model_registry.CAPABILITIES[capability][0]
+            count = len(groups.get(capability, []))
+            self.capability_tabs.setTabText(index, f"{title}  {count}" if count else title)
+        capability = self.current_capability()
+        self.capability_note.setText(model_registry.CAPABILITIES[capability][1])
+        self.your_tiles.set_tiles(
+            [self.model_tile(entry) for entry in groups.get(capability, [])],
+            "None yet. Add one from Discover below.")
+        self.render_discover_tiles()
+
+    def typical_speed_text(self, entry):
+        """Estimated time for 1,000 characters, split the way generation would split them."""
+        count = max(1, math.ceil(1000 / (self.max_section_chars_for(entry) * 0.85)))
+        seconds, measured = self.estimate_seconds(entry, [1000 // count] * count)
+        amount = f"{seconds:.0f} s" if seconds < 90 else f"{seconds / 60:.1f} min"
+        return f"\u2248 {amount} per 1,000 characters", measured
+
+    def model_tile(self, entry):
+        engine = model_registry.engine_for(entry)
+        active = self.is_active_entry(entry)
+        repo = entry["repo_id"]
+        subtitle = model_registry.engine_label(entry)
+        if engine.uses_weights_version:
+            subtitle += f" {model_registry.weights_file(entry).split('_')[-1].split('.')[0].upper()}"
+        subtitle += f" \u00b7 {engine.languages_summary}"
+        badges = []
+        if active:
+            badges.append(("active", "Loaded", "This model is loaded and ready to generate."))
+        elif entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
+            badges.append(("status", "Needs engine", "Click to install the Qwen engine (about 3 GB)."))
+        elif model_registry.is_downloaded(entry):
+            size = model_registry.format_size(self.model_cache_sizes.get(repo, 0))
+            badges.append(("status", f"Ready \u00b7 {size}", "Downloaded; loads from the local cache."))
+        elif entry.get("download_bytes"):
+            size = model_registry.format_size(entry["download_bytes"])
+            badges.append(("status", f"Download {size}", "Downloads the first time you load it."))
+        else:
+            badges.append(("status", "Not downloaded", "Downloads the first time you load it."))
+        badges.append(model_tiles.license_badge(model_registry.license_of(entry)))
+        speed, measured = self.typical_speed_text(entry)
+        if not entry.get("enabled", True):
+            speed = f"Hidden · {speed}"
+        tooltip = "\n".join(line for line in (
+            f"{entry['label']}  ({repo})",
+            engine.description,
+            entry.get("notes", ""),
+            "" if entry.get("enabled", True) else "Hidden from the model switcher on the Generate page.",
+            f"Speed {'measured from your runs' if measured else 'estimated until you generate with it'}.",
+            "" if active else "Click to load. Right-click for more.") if line)
+        tile = model_tiles.ModelTile(entry["label"], subtitle, badges, speed, tooltip,
+                                     active=active, with_menu=True)
+        tile.clicked.connect(lambda e=entry: self.load_entry(e))
+        tile.menu_requested.connect(lambda pos, e=entry: self.show_model_menu(e, pos))
+        return tile
+
+    def show_model_menu(self, entry, pos):
+        menu = QMenu(self)
+        active = self.is_active_entry(entry)
+        hidden = not entry.get("enabled", True)
+        is_default = entry["repo_id"] == DEFAULT_MODEL_REPO and entry.get("backend") == BACKEND_MULTILINGUAL \
+            and sum(1 for e in self.model_entries if self.entry_key(e) == self.entry_key(entry)) == 1
+        visible = sum(1 for e in self.model_entries if e.get("enabled", True))
+        actions = (
+            ("Loaded" if active else "Load", lambda: self.load_entry(entry),
+             not active and not self.model_busy()),
+            None,
+            ("Edit...", lambda: self.edit_model(entry), True),
+            ("Duplicate...", lambda: self.duplicate_model(entry), True),
+            ("Show in model switcher" if hidden else "Hide from model switcher",
+             lambda: self.toggle_model_hidden(entry), hidden or visible > 1),
+            ("Open on Hugging Face",
+             lambda: QDesktopServices.openUrl(QUrl(f"https://huggingface.co/{entry['repo_id']}")), True),
+            None,
+            ("Remove (official fallback)" if is_default else "Remove (unload it first)" if active
+             else "Remove...", lambda: self.remove_model(entry), not is_default and not active),
+        )
+        for item in actions:
+            if item is None:
+                menu.addSeparator()
+                continue
+            text, callback, enabled = item
+            action = menu.addAction(text)
+            action.setEnabled(enabled)
+            action.triggered.connect(lambda _checked=False, callback=callback: callback())
+        menu.exec(pos)
 
     def update_model_details(self):
-        entry = self.selected_list_entry()
-        has_entry = entry is not None
-        for widget in (self.edit_model_button, self.duplicate_model_button, self.remove_model_button):
-            widget.setEnabled(has_entry)
-        if not has_entry:
-            self.model_name_label.setText("No models")
-            self.model_active_chip.setVisible(False)
+        self.render_model_tiles()
+
+    # --- Discover ---
+
+    def start_discover(self):
+        if getattr(self, "discover_thread", None) is not None:
+            self.discover_rerun = True  # search again with the newest text when this one ends
             return
-        engine = model_registry.engine_for(entry)
-        self.model_name_label.setText(entry["label"])
-        active = self.entry_key(entry) == self.loaded_entry_key() and self.model is not None
-        self.model_active_chip.setVisible(active)
-        engine_text = model_registry.engine_label(entry)
-        if engine.uses_weights_version:
-            engine_text += f" \u00b7 weights {model_registry.weights_file(entry).split('_')[-1].split('.')[0].upper()}"
-        self.model_engine_label.setText(engine_text)
-        self.model_engine_label.setToolTip(engine.description)
-        repo = entry["repo_id"]
-        self.model_repo_label.setText(f'<a href="https://huggingface.co/{repo}">{repo}</a>')
-        status = entry.get("_status", "")
-        if entry.get("notes"):
-            status += f" \u00b7 {entry['notes']}"
-        self.model_status_label.setText(status[:1].upper() + status[1:])
-        self.model_status_label.setToolTip(status)
-        busy = getattr(self, "model_is_loading", False) or self.is_generating
-        self.load_model_button.setEnabled(not busy and not active)
-        needs_install = entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed()
-        self.load_model_button.setText(
-            "Loaded" if active else "Install Qwen engine..." if needs_install else "Load this model")
-        is_default = repo == DEFAULT_MODEL_REPO and entry.get("backend") == BACKEND_MULTILINGUAL \
-            and sum(1 for e in self.model_entries if self.entry_key(e) == self.entry_key(entry)) == 1
-        self.remove_model_button.setEnabled(not is_default and not active)
-        self.remove_model_button.setToolTip(
-            "The official model can't be removed; it is the fallback." if is_default else
-            "Unload it first by switching to another model." if active else
-            "Remove from the list. Downloaded files stay in the cache.")
+        self.discover_rerun = False
+        self.discover_status.setText("Searching Hugging Face...")
+        self.discover_thread = model_tiles.DiscoverThread(
+            self.discover_input.text(), self.app_settings.get("hf_token"), self)
+        self.discover_thread.found.connect(self.on_discover_results)
+        self.discover_thread.start()
+
+    def on_discover_results(self, results, error):
+        self.discover_thread.wait()
+        self.discover_thread = None
+        self.discover_results = results
+        self.discover_error = error
+        if getattr(self, "discover_rerun", False):
+            self.start_discover()
+            return
+        self.render_discover_tiles()
+
+    def render_discover_tiles(self):
+        results = getattr(self, "discover_results", None)
+        if results is None:
+            if getattr(self, "discover_thread", None) is None:
+                self.discover_status.setText("Open this page with an internet connection to see more models.")
+            return
+        existing = {entry.get("repo_id") for entry in self.model_entries}
+        capability = self.current_capability()
+        title = model_registry.CAPABILITIES[capability][0].lower()
+        matching = [r for r in results if r.capability == capability and r.repo_id not in existing]
+        self.discover_tiles.set_tiles([self.discover_tile(result) for result in matching[:30]])
+        query = self.discover_input.text().strip()
+        if self.discover_error:
+            self.discover_status.setText(self.discover_error)
+        elif not matching:
+            self.discover_status.setText(
+                f"No other {title} models match \u201c{query}\u201d." if query else
+                f"No other {title} models found. Try a search, e.g. a language.")
+        else:
+            noun = "model" if len(matching) == 1 else "models"
+            scope = f" matching \u201c{query}\u201d" if query else ""
+            self.discover_status.setText(
+                f"{len(matching)} {noun}{scope}, most downloaded first. Click one to add it.")
+            self.discover_status.setToolTip("Only models this app can load are shown. Nothing "
+                                            "downloads until you load a model.")
+
+    def discover_tile(self, result):
+        owner, _sep, name = result.repo_id.partition("/")
+        badges = [model_tiles.license_badge(result.license)]
+        if result.gated:
+            badges.append(("status", "Gated", "Accept the terms on huggingface.co and save a token below."))
+        if result.languages:
+            count = len(result.languages)
+            shown = f"{count} languages" if count > 1 else f"Language: {result.languages[0]}"
+            badges.append(("status", shown, "Languages: " + ", ".join(result.languages)))
+        detail = f"{model_tiles.compact_count(result.downloads)} downloads \u00b7 {result.likes} likes"
+        if result.updated:
+            detail += f" \u00b7 {result.updated}"
+        tooltip = f"{result.repo_id}\n{result.summary}\nClick to add it to your models."
+        tile = model_tiles.ModelTile(name, f"{owner} \u00b7 {result.summary}", badges, detail, tooltip)
+        tile.clicked.connect(lambda r=result: self.add_from_discover(r))
+        tile.menu_requested.connect(lambda _pos, r=result: QDesktopServices.openUrl(
+            QUrl(f"https://huggingface.co/{r.repo_id}")))
+        return tile
+
+    def add_from_discover(self, result):
+        seed = {"repo_id": result.repo_id}
+        if result.license:
+            seed["license"] = result.license
+        new_entry = self._edit_entry_dialog(seed)
+        if new_entry:
+            self.persist_model_entries(self.model_entries + [new_entry], new_entry)
 
     def persist_model_entries(self, entries, select_entry=None):
         try:
@@ -3015,33 +3120,18 @@ class ChatterboxApp(QMainWindow):
             return None
         return dialog.result_entry()
 
-    def find_models(self):
-        existing = {e.get("repo_id") for e in self.model_entries}
-        finder = FindModelsDialog(self.app_settings.get("hf_token"), existing, self)
-        if not dialog_accepted(finder.exec()) or not finder.selected_repo:
-            return
-        new_entry = self._edit_entry_dialog({"repo_id": finder.selected_repo})
-        if new_entry:
-            self.persist_model_entries(self.model_entries + [new_entry], new_entry)
-
     def add_model(self):
         new_entry = self._edit_entry_dialog(None)
         if new_entry:
             self.persist_model_entries(self.model_entries + [new_entry], new_entry)
 
-    def edit_model(self):
-        entry = self.selected_list_entry()
-        if entry is None:
-            return
+    def edit_model(self, entry):
         updated = self._edit_entry_dialog(entry, replacing=entry)
         if updated:
             entries = [updated if e is entry else e for e in self.model_entries]
             self.persist_model_entries(entries, updated)
 
-    def duplicate_model(self):
-        entry = self.selected_list_entry()
-        if entry is None:
-            return
+    def duplicate_model(self, entry):
         copy = dict(entry)
         base, n = f"{entry['label']} copy", 2
         copy["label"] = base
@@ -3052,10 +3142,11 @@ class ChatterboxApp(QMainWindow):
         if updated:
             self.persist_model_entries(self.model_entries + [updated], updated)
 
-    def remove_model(self):
-        entry = self.selected_list_entry()
-        if entry is None:
-            return
+    def toggle_model_hidden(self, entry):
+        updated = dict(entry, enabled=not entry.get("enabled", True))
+        self.persist_model_entries([updated if e is entry else e for e in self.model_entries], updated)
+
+    def remove_model(self, entry):
         answer = QMessageBox.question(
             self, "Remove Model",
             f"Remove '{entry['label']}' from the model list?\n\nDownloaded files stay in the "
@@ -3063,12 +3154,14 @@ class ChatterboxApp(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self.persist_model_entries([e for e in self.model_entries if e is not entry])
 
-    def load_selected_list_model(self):
-        entry = self.selected_list_entry()
-        if entry is None:
+    def load_entry(self, entry):
+        if self.is_active_entry(entry):
+            return
+        if self.model_busy():
+            self.set_status_message("Status: Wait for the current load or generation to finish.")
             return
         if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
-            self.install_qwen_engine()
+            self.install_qwen_engine(entry)
             return
         index = self.model_repo_combo.findText(entry["label"])
         if index >= 0 and index != self.model_repo_combo.currentIndex():
@@ -3076,7 +3169,10 @@ class ChatterboxApp(QMainWindow):
         elif self.entry_key(entry) != self.loaded_entry_key() or self.model is None:
             self.load_model(entry)
 
-    def install_qwen_engine(self):
+    def install_qwen_engine(self, entry=None):
+        if getattr(self, "qwen_install_thread", None) is not None and self.qwen_install_thread.isRunning():
+            self.set_status_message("Status: The Qwen engine is still installing. Progress is on the Log page.")
+            return
         answer = QMessageBox.question(
             self, "Install Qwen Engine",
             "Qwen3-TTS runs in its own Python environment (engines/qwen) because it needs "
@@ -3086,7 +3182,7 @@ class ChatterboxApp(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.set_status_message("Status: Installing the Qwen engine. Progress is on the Log page.")
-        self.load_model_button.setEnabled(False)
+        self.pending_install_entry = entry
         self.qwen_install_thread = QwenInstallThread()
         self.qwen_install_thread.finished_with.connect(self.on_qwen_install_finished)
         self.qwen_install_thread.start()
@@ -3098,8 +3194,9 @@ class ChatterboxApp(QMainWindow):
         else:
             self.set_status_message("Status: Qwen engine installed. Loading the model...")
             self.refresh_models_page()
-            self.load_selected_list_model()
-        self.update_model_details()
+            if self.pending_install_entry is not None:
+                self.load_entry(self.pending_install_entry)
+        self.render_model_tiles()
 
     def save_hf_token(self):
         token = self.hf_token_input.text().strip()

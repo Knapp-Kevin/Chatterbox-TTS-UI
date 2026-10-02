@@ -17,7 +17,47 @@ from huggingface_hub.errors import (
 ENTRY_KEYS = (
     "repo_id", "label", "enabled", "experimental", "test_text", "test_texts",
     "notes", "backend", "language_id", "multilingual_t3_model", "qwen_variant",
+    "license", "download_bytes",
 )
+
+# ---------- licenses ----------
+
+# Licenses of the models the app ships with, for entries saved before licenses were recorded.
+KNOWN_LICENSES = {"ResembleAI/chatterbox": "mit", "Qwen/": "apache-2.0"}
+PERMISSIVE_LICENSES = {
+    "mit": "MIT", "apache-2.0": "Apache 2.0", "bsd-2-clause": "BSD", "bsd-3-clause": "BSD",
+    "cc-by-4.0": "CC BY 4.0", "cc0-1.0": "CC0", "unlicense": "Unlicense", "mpl-2.0": "MPL 2.0",
+    "openrail": "OpenRAIL", "openrail++": "OpenRAIL", "creativeml-openrail-m": "OpenRAIL",
+}
+
+
+def license_from_tags(tags):
+    for tag in tags or []:
+        if tag.lower().startswith("license:"):
+            return tag.split(":", 1)[1].lower()
+    return ""
+
+
+def license_of(entry):
+    license_id = (entry.get("license") or "").lower()
+    if not license_id:
+        for prefix, known in KNOWN_LICENSES.items():
+            if entry.get("repo_id", "").startswith(prefix):
+                return known
+    return license_id
+
+
+def license_badge(license_id):
+    """(kind, label): kind is 'permissive', 'noncommercial' or 'unknown'."""
+    license_id = (license_id or "").lower()
+    if license_id in PERMISSIVE_LICENSES:
+        return "permissive", PERMISSIVE_LICENSES[license_id]
+    if ("nc" in license_id.split("-") or "non-commercial" in license_id
+            or "cpml" in license_id or "coqui" in license_id):
+        return "noncommercial", "Non-commercial"
+    if not license_id or license_id == "other":
+        return "unknown", "License ?"
+    return "unknown", "License ?"
 
 
 @dataclass(frozen=True)
@@ -194,6 +234,7 @@ class RepoCheck:
     gated: bool = False
     private: bool = False
     qwen_variant: str = ""
+    license: str = ""
 
 
 def check_repo(repo_id, token=None):
@@ -214,6 +255,8 @@ def check_repo(repo_id, token=None):
         return RepoCheck(False, f"Could not reach Hugging Face: {exc}")
 
     sizes = {sibling.rfilename: (sibling.size or 0) for sibling in (info.siblings or [])}
+    license_id = license_from_tags(getattr(info, "tags", None)) or str(
+        getattr(getattr(info, "card_data", None), "license", "") or "").lower()
     versions = tuple(short for short, filename in WEIGHT_VERSIONS.items() if filename in sizes)
     gated = bool(getattr(info, "gated", False))
     private = bool(getattr(info, "private", False))
@@ -224,7 +267,9 @@ def check_repo(repo_id, token=None):
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
     elif "config.json" in sizes and "model.safetensors" in sizes:
-        return _check_qwen_repo(repo_id, token, sizes, gated, private)
+        result = _check_qwen_repo(repo_id, token, sizes, gated, private)
+        result.license = license_id
+        return result
     else:
         weights = sorted(name for name in sizes
                          if name.endswith((".safetensors", ".pt", ".bin", ".gguf", ".onnx")))
@@ -239,7 +284,7 @@ def check_repo(repo_id, token=None):
     if versions:
         detail += f", weights {', '.join(v.upper() for v in versions)}"
     detail += f" · about {format_size(download)} to download · {access}"
-    return RepoCheck(True, detail, backend, versions, download, gated, private)
+    return RepoCheck(True, detail, backend, versions, download, gated, private, "", license_id)
 
 
 def _check_qwen_repo(repo_id, token, sizes, gated, private):
@@ -284,6 +329,11 @@ class SearchResult:
     languages: tuple
     updated: str
     qwen_variant: str = ""
+    license: str = ""
+
+    @property
+    def capability(self):
+        return capability_for({"backend": self.backend, "qwen_variant": self.qwen_variant})
 
 
 def _classify(model):
@@ -337,7 +387,8 @@ def search_models(query="", engine="all", token=None, limit=40):
                 languages = tuple(sorted(tags & KNOWN_LANGUAGE_TAGS))
                 updated = model.last_modified.strftime("%b %Y") if getattr(model, "last_modified", None) else ""
                 results.append(SearchResult(model.id, backend, summary, model.downloads or 0,
-                                            model.likes or 0, bool(model.gated), languages, updated, variant))
+                                            model.likes or 0, bool(model.gated), languages, updated, variant,
+                                            license_from_tags(model.tags)))
         except Exception as exc:
             raise RuntimeError(f"Hugging Face search failed: {exc}") from exc
     results.sort(key=lambda result: result.downloads, reverse=True)
