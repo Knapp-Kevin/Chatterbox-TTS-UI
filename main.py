@@ -134,7 +134,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
 from PySide6.QtMultimedia import (
     QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
 )
-from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
+from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette, QIcon, QLinearGradient
 import ui_theme
 import audio_effects
 import documents
@@ -742,13 +742,25 @@ class LevelHistoryWidget(QWidget):
             normal = self.palette().color(QPalette.ColorRole.Mid)
         bar_width = width / len(self.levels)
         middle = height / 2
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        theme = ui_theme.current()
         for index, level in enumerate(self.levels):
             # Square-root scaling so normal speech fills a useful part of the height.
             bar_height = max(2.0, min(1.0, level) ** 0.5 * (height - 6))
-            color = QColor("#d9534f") if level >= 0.98 else normal
-            painter.fillRect(
-                int(index * bar_width + 1), int(middle - bar_height / 2),
-                max(1, int(bar_width) - 2), int(bar_height), color)
+            top = middle - bar_height / 2
+            if level >= 0.98:
+                brush = QColor("#d9534f")
+            elif self.active:
+                brush = QLinearGradient(0, top, 0, top + bar_height)
+                brush.setColorAt(0, QColor(theme["accent_top"]))
+                brush.setColorAt(0.5, QColor(theme["accent_bottom"]))
+                brush.setColorAt(1, QColor(theme["accent_top"]))
+            else:
+                brush = normal
+            painter.setBrush(brush)
+            bar = max(1.0, bar_width - 2)
+            painter.drawRoundedRect(index * bar_width + 1, top, bar, bar_height, bar / 2, bar / 2)
         painter.end()
 
 
@@ -1285,6 +1297,7 @@ class ChatterboxApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Chatterbox TTS Interface")
+        self.setWindowIcon(QIcon(ui_theme.LOGO))
         self.resize(1000, 820)
         self.model = None
         self.device_used = "cpu"
@@ -1374,8 +1387,7 @@ class ChatterboxApp(QMainWindow):
     PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_LOG = range(4)
 
     def _make_card(self, title=None):
-        card = QFrame()
-        card.setObjectName("Card")
+        card = ui_theme.CardFrame()
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(10)
@@ -1388,14 +1400,19 @@ class ChatterboxApp(QMainWindow):
     def _make_page(self, title, subtitle):
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+        # Cards carry their own shadow margin, so page spacing is tighter.
+        layout.setContentsMargins(17, 14, 17, 10)
+        layout.setSpacing(2)
         title_label = QLabel(title)
         title_label.setObjectName("PageTitle")
         subtitle_label = QLabel(subtitle)
         subtitle_label.setObjectName("PageSubtitle")
+        # Line up with the cards' visible edge (inside their shadow margin).
+        for label in (title_label, subtitle_label):
+            label.setContentsMargins(ui_theme.SHADOW, 0, ui_theme.SHADOW, 0)
         layout.addWidget(title_label)
         layout.addWidget(subtitle_label)
+        layout.addSpacing(6)
         return page, layout
 
     @staticmethod
@@ -1416,7 +1433,7 @@ class ChatterboxApp(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        sidebar_panel = QWidget()
+        sidebar_panel = ui_theme.SidebarPanel()
         sidebar_panel.setObjectName("SidebarPanel")
         sidebar_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar_layout = QVBoxLayout(sidebar_panel)
@@ -1428,22 +1445,33 @@ class ChatterboxApp(QMainWindow):
         self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         for label in ("Generate", "Voice", "Model", "Log"):
             self.sidebar.addItem(QListWidgetItem(label))
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(18, 16, 12, 10)
+        title_row.setSpacing(9)
+        logo = QLabel()
+        logo.setPixmap(QIcon(ui_theme.LOGO).pixmap(26, 26))
+        title_row.addWidget(logo)
         app_title = QLabel("Chatterbox")
         app_title.setObjectName("AppTitle")
-        app_title.setAutoFillBackground(False)
-        sidebar_layout.addSpacing(14)
-        sidebar_layout.addWidget(app_title)
+        title_row.addWidget(app_title)
+        title_row.addStretch(1)
+        sidebar_layout.addLayout(title_row)
         sidebar_layout.addWidget(self.sidebar)
         self.pages = QStackedWidget()
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
+        content_area = ui_theme.TexturedArea()
+        content_layout = QVBoxLayout(content_area)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self.pages)
         root_layout.addWidget(sidebar_panel)
-        root_layout.addWidget(self.pages, 1)
+        root_layout.addWidget(content_area, 1)
 
         # ---------- Generate page ----------
         generate_page, generate_layout = self._make_page(
             "Generate", "Write your text, choose the delivery, then generate.")
 
         voice_row = QHBoxLayout()
+        voice_row.setContentsMargins(ui_theme.SHADOW, 0, ui_theme.SHADOW, 2)
         voice_row.addWidget(QLabel("Voice"))
         self.voice_chip = QLabel("Default voice")
         self.voice_chip.setObjectName("VoiceChip")
@@ -2733,6 +2761,7 @@ class ChatterboxApp(QMainWindow):
                 header = QListWidgetItem(title.upper())
                 header.setFlags(Qt.ItemFlag.NoItemFlags)
                 header.setFont(header_font)
+                header.setForeground(QApplication.palette().color(QPalette.ColorRole.Link))
                 header.setToolTip(description)
                 self.models_list.addItem(header)
                 continue
@@ -3006,6 +3035,7 @@ class ChatterboxApp(QMainWindow):
             header = self.model_repo_combo.model().item(self.model_repo_combo.count() - 1)
             header.setFlags(Qt.ItemFlag.NoItemFlags)
             header.setFont(header_font)
+            header.setForeground(QApplication.palette().color(QPalette.ColorRole.Link))
             for entry in members:
                 self.model_repo_combo.addItem(entry["label"], visible_entries.index(entry))
                 self.model_repo_combo.setItemData(
