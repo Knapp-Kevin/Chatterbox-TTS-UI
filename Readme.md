@@ -69,7 +69,8 @@ Windows remains the primary maintained path.
 *   **Simple PySide6 Interface:**
     *   Sidebar layout with **Generate**, **Voice**, **Model** and **Log** pages, and a light/dark theme (amber accent) that follows the Windows app mode.
     *   Plain-language delivery controls: Expressiveness (exaggeration), Pacing (CFG weight), Variation (temperature) and Take number (seed); hover any control for details.
-    *   **Finishing touches** (applied after generation): speed and pitch (FFmpeg Rubber Band with formant preservation when available, librosa otherwise), pause between long-text sections, even-out volume, silence trimming, and WAV/FLAC/MP3 output. Settings are remembered between sessions.
+    *   **Finishing touches** (applied after generation): pause between long-text sections, even-out volume, silence trimming, and lossless WAV/FLAC output. Settings are remembered between sessions.
+    *   **Advanced page:** speed and pitch (FFmpeg Rubber Band with formant preservation when available, librosa otherwise) and MP3 export, with a note that these can weaken the inaudible AI watermark. The Finishing touches summary flags them while active.
     *   **Qwen3-TTS engine (optional, Apache-2.0):** three extra models appear in the model switcher:
         *   *Qwen3 preset voices* - nine built-in speakers you can steer with a plain-language style ("excited and upbeat", "whisper softly").
         *   *Qwen3 voice design* - describe a voice ("a calm, low narrator voice with a slight rasp") and Qwen creates it.

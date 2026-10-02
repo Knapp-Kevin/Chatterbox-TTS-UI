@@ -195,6 +195,7 @@ resolve_multilingual_t3_model = getattr(
 )
 
 MAX_TEXT_INPUT_LENGTH = documents.MAX_SECTION_LENGTH
+LOSSLESS_FORMATS = ["WAV", "FLAC"]
 QWEN_BACKEND = "qwen3"
 
 
@@ -1384,7 +1385,7 @@ class ChatterboxApp(QMainWindow):
             self.generate_button.setEnabled(False)
             self.load_model_button.setEnabled(False)
 
-    PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_LOG = range(4)
+    PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_ADVANCED, PAGE_LOG = range(5)
 
     def _make_card(self, title=None):
         card = ui_theme.CardFrame()
@@ -1443,7 +1444,7 @@ class ChatterboxApp(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setFixedWidth(180)
         self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for label in ("Generate", "Voice", "Model", "Log"):
+        for label in ("Generate", "Voice", "Model", "Advanced", "Log"):
             self.sidebar.addItem(QListWidgetItem(label))
         title_row = QHBoxLayout()
         title_row.setContentsMargins(18, 16, 12, 10)
@@ -1685,25 +1686,16 @@ class ChatterboxApp(QMainWindow):
             finishing_grid.addWidget(label, row, column)
             finishing_grid.addWidget(widget, row, column + 1)
 
-        self.speed_slider = self._create_slider(
-            *audio_effects.SPEED_RANGE, 0.05, 1.0, "{:.2f}x")
-        add_finishing(0, 0, "Speed", self.speed_slider,
-                      "Speaking speed without changing the pitch. 1.00x is unchanged.")
-        self.pitch_slider = self._create_slider(
-            *audio_effects.PITCH_RANGE, 0.5, 0.0, "{:+.1f} st")
-        add_finishing(0, 2, "Pitch", self.pitch_slider,
-                      "Raise or lower the voice in semitones while keeping its natural "
-                      "character. Small changes (1-2 st) sound most natural.")
         self.pause_slider = self._create_slider(
             *audio_effects.PAUSE_RANGE, 0.1, 0.0, "{:.1f} s")
-        add_finishing(1, 0, "Section pause", self.pause_slider,
+        add_finishing(0, 0, "Section pause", self.pause_slider,
                       f"Long text is generated in sections of about {MAX_TEXT_INPUT_LENGTH} "
                       "characters. This adds a pause where the sections are joined.")
         self.output_format_combo = QComboBox()
-        self.output_format_combo.addItems(list(audio_effects.OUTPUT_FORMATS))
-        add_finishing(1, 2, "Save as", self.output_format_combo,
-                      "WAV is uncompressed, FLAC is lossless and smaller, MP3 is "
-                      "smallest and plays everywhere.")
+        self.output_format_combo.addItems(LOSSLESS_FORMATS)
+        add_finishing(0, 2, "Save as", self.output_format_combo,
+                      "WAV is uncompressed; FLAC is lossless and about half the size. "
+                      "MP3 is on the Advanced page.")
         finishing_checks = QHBoxLayout()
         self.even_volume_checkbox = QCheckBox("Even out volume")
         self.even_volume_checkbox.setToolTip(
@@ -1716,21 +1708,20 @@ class ChatterboxApp(QMainWindow):
         finishing_checks.addWidget(self.trim_silence_checkbox)
         finishing_checks.addStretch(1)
         reset_finishing_button = QPushButton("Reset")
-        reset_finishing_button.setToolTip("Restore the default finishing settings.")
-        reset_finishing_button.clicked.connect(
-            lambda: self.apply_finishing_settings(audio_effects.FinishingSettings()))
+        reset_finishing_button.setToolTip(
+            "Restore the default finishing settings (Advanced effects are kept).")
+        reset_finishing_button.clicked.connect(self.reset_finishing)
         finishing_checks.addWidget(reset_finishing_button)
-        finishing_grid.addLayout(finishing_checks, 2, 0, 1, 4)
+        finishing_grid.addLayout(finishing_checks, 1, 0, 1, 4)
         delivery_layout.addWidget(self.finishing_panel)
+        self.finishing_toggle.setToolTip(
+            "Adjustments applied to the audio after it is generated. Speed, pitch and MP3 "
+            "are on the Advanced page.")
 
-        for slider in (self.speed_slider, self.pitch_slider, self.pause_slider):
-            slider.slider.valueChanged.connect(self.update_finishing_summary)
+        self.pause_slider.slider.valueChanged.connect(self.update_finishing_summary)
         self.output_format_combo.currentTextChanged.connect(self.update_finishing_summary)
         self.even_volume_checkbox.toggled.connect(self.update_finishing_summary)
         self.trim_silence_checkbox.toggled.connect(self.update_finishing_summary)
-        self.apply_finishing_settings(
-            audio_effects.FinishingSettings.from_dict(self.app_settings.get("finishing")))
-        self.set_finishing_expanded(bool(self.app_settings.get("finishing_expanded", False)))
         generate_layout.addWidget(delivery_card)
 
         player_card, player_layout = self._make_card()
@@ -1991,6 +1982,68 @@ class ChatterboxApp(QMainWindow):
         tuning_layout.addWidget(self.tuning_panel)
         model_layout.addWidget(tuning_card)
         self.pages.addWidget(model_page)
+
+        # ---------- Advanced page ----------
+        advanced_page, advanced_layout = self._make_page(
+            "Advanced", "Extra processing applied to results after they are generated.")
+        effects_card, effects_layout = self._make_card("Voice effects")
+        watermark_note = QLabel(
+            "Pitch, speed and MP3 compression change the audio after it is generated and can "
+            "weaken the inaudible watermark that marks it as AI-generated. Leave them at their "
+            "defaults if that matters to you.")
+        watermark_note.setObjectName("Note")
+        watermark_note.setWordWrap(True)
+        effects_layout.addWidget(watermark_note)
+        effects_grid = QGridLayout()
+        effects_grid.setHorizontalSpacing(14)
+        effects_grid.setColumnStretch(1, 1)
+        effects_grid.setColumnStretch(3, 1)
+        self.speed_slider = self._create_slider(
+            *audio_effects.SPEED_RANGE, 0.05, 1.0, "{:.2f}x")
+        self.pitch_slider = self._create_slider(
+            *audio_effects.PITCH_RANGE, 0.5, 0.0, "{:+.1f} st")
+        for column, (title, slider, tip) in enumerate((
+                ("Speed", self.speed_slider,
+                 "Speaking speed without changing the pitch. 1.00x is unchanged."),
+                ("Pitch", self.pitch_slider,
+                 "Raise or lower the voice in semitones while keeping its natural character. "
+                 "Small changes (1-2 st) sound most natural."))):
+            caption = QLabel(title)
+            caption.setToolTip(tip)
+            slider.setToolTip(tip)
+            effects_grid.addWidget(caption, 0, column * 2)
+            effects_grid.addWidget(slider, 0, column * 2 + 1)
+        effects_layout.addLayout(effects_grid)
+        advanced_layout.addWidget(effects_card)
+
+        export_card, export_layout = self._make_card("Export")
+        self.mp3_checkbox = QCheckBox("Save results as MP3")
+        self.mp3_checkbox.setToolTip(
+            "Smallest files and plays everywhere, but lossy. Replaces the WAV/FLAC choice in "
+            "Finishing touches while ticked.")
+        export_layout.addWidget(self.mp3_checkbox)
+        mp3_hint = QLabel("Lossy compression; replaces the WAV/FLAC choice on the Generate page.")
+        mp3_hint.setObjectName("Muted")
+        export_layout.addWidget(mp3_hint)
+        advanced_layout.addWidget(export_card)
+
+        advanced_actions = QHBoxLayout()
+        advanced_actions.setContentsMargins(ui_theme.SHADOW, 0, ui_theme.SHADOW, 0)
+        advanced_actions.addStretch(1)
+        reset_advanced_button = QPushButton("Reset effects")
+        reset_advanced_button.setToolTip("Speed 1.00x, pitch 0, lossless output.")
+        reset_advanced_button.clicked.connect(self.reset_advanced)
+        advanced_actions.addWidget(reset_advanced_button)
+        advanced_layout.addLayout(advanced_actions)
+        advanced_layout.addStretch(1)
+        self.pages.addWidget(advanced_page)
+
+        for slider in (self.speed_slider, self.pitch_slider):
+            slider.slider.valueChanged.connect(self.update_finishing_summary)
+        self.mp3_checkbox.toggled.connect(self.on_mp3_toggled)
+        self.apply_finishing_settings(
+            audio_effects.FinishingSettings.from_dict(self.app_settings.get("finishing")))
+        self.set_finishing_expanded(bool(self.app_settings.get("finishing_expanded", False)))
 
         # ---------- Log page ----------
         log_page, log_layout = self._make_page(
@@ -2516,7 +2569,7 @@ class ChatterboxApp(QMainWindow):
             section_pause=round(self.pause_slider.get_value(), 1),
             even_volume=self.even_volume_checkbox.isChecked(),
             trim_silence=self.trim_silence_checkbox.isChecked(),
-            output_format=self.output_format_combo.currentText(),
+            output_format="MP3" if self.mp3_checkbox.isChecked() else self.output_format_combo.currentText(),
         )
 
     def apply_finishing_settings(self, settings):
@@ -2525,11 +2578,42 @@ class ChatterboxApp(QMainWindow):
         self.pause_slider.set_value(settings.section_pause)
         self.even_volume_checkbox.setChecked(settings.even_volume)
         self.trim_silence_checkbox.setChecked(settings.trim_silence)
-        self.output_format_combo.setCurrentText(settings.output_format)
+        self.mp3_checkbox.setChecked(settings.output_format == "MP3")
+        if settings.output_format in LOSSLESS_FORMATS:
+            self.output_format_combo.setCurrentText(settings.output_format)
+        self.update_finishing_summary()
+
+    def reset_finishing(self):
+        """Finishing touches only; Advanced effects are left as they are."""
+        defaults = audio_effects.FinishingSettings()
+        self.pause_slider.set_value(defaults.section_pause)
+        self.even_volume_checkbox.setChecked(defaults.even_volume)
+        self.trim_silence_checkbox.setChecked(defaults.trim_silence)
+        self.output_format_combo.setCurrentText(defaults.output_format)
+        self.update_finishing_summary()
+
+    def reset_advanced(self):
+        self.speed_slider.set_value(1.0)
+        self.pitch_slider.set_value(0.0)
+        self.mp3_checkbox.setChecked(False)
+        self.update_finishing_summary()
+
+    def on_mp3_toggled(self, checked):
+        self.output_format_combo.setEnabled(not checked)
+        self.output_format_combo.setToolTip(
+            "MP3 is selected on the Advanced page." if checked else
+            "WAV is uncompressed; FLAC is lossless and about half the size. "
+            "MP3 is on the Advanced page.")
         self.update_finishing_summary()
 
     def update_finishing_summary(self, *_args):
-        self.finishing_summary_label.setText(self.current_finishing_settings().summary())
+        if not hasattr(self, "mp3_checkbox"):
+            return  # Advanced page not built yet
+        settings = self.current_finishing_settings()
+        summary = settings.summary()
+        advanced = (abs(settings.speed - 1.0) > 1e-6 or abs(settings.pitch_semitones) > 1e-6
+                    or settings.output_format == "MP3")
+        self.finishing_summary_label.setText(summary + ("  (effects on Advanced page)" if advanced else ""))
 
     def set_finishing_expanded(self, expanded):
         self.finishing_panel.setVisible(expanded)

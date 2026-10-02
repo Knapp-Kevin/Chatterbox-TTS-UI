@@ -265,6 +265,10 @@ def _stylesheet(c):
     QLabel#PageSubtitle, QLabel#Muted {{ color: {c['muted']}; }}
     QFrame#Card {{ background: transparent; border: none; }}
     QLabel#CardTitle {{ font-weight: 700; font-size: 10.5pt; }}
+    QLabel#Note {{
+        background: {c['accent_soft']}; border-left: 3px solid {c['accent']};
+        border-radius: 6px; padding: 8px 10px; color: {c['text']};
+    }}
     QLabel#VoiceChip {{
         background: {chip}; border: 1px solid {c['accent_soft']}; border-bottom-color: {c['border_strong']};
         border-radius: 12px; padding: 4px 12px; font-weight: 600;
