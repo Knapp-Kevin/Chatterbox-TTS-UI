@@ -216,6 +216,10 @@ def license_badge(license_id):
         "noncommercial": f"License: {license_id}. Not for commercial use.",
         "unknown": f"License: {license_id or 'not stated'}. Read the model card before using output commercially.",
     }
+    if license_id == "mit-research":
+        tips["unknown"] = ("License: MIT, but the model card limits it to research use and recommends "
+                           "against commercial use. Never clone a real person's voice without their "
+                           "recorded consent.")
     return kind, text, tips[kind]
 
 

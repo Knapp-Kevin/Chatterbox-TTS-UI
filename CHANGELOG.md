@@ -13,6 +13,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Voice cloning**, which can use a transcript of the clip for closer likeness.
 
   Qwen runs in its own environment, which the app offers to install. Its output can carry the same AI watermark as Chatterbox.
+- **VibeVoice engine and Conversations (optional, research use).** A new **Conversations** tab. Write a script with up to 4 speakers (`Name: line`), pick a voice for each with **Cast…** (7 sample voices, your recordings or any clip), and VibeVoice performs it as one natural conversation. Long scripts split only between turns, and each speaker keeps their voice throughout. MIT-licensed but limited to research use by its model card, so it's badged amber **Research use**.
 - **OmniVoice engine (optional, non-commercial).** Fast voice cloning and voice design in 600+ languages from a 3 GB model (CC BY-NC 4.0 weights, badged red). Cloning needs the clip transcript; voice design uses an **Attributes…** picker (gender, age, pitch, whisper, accent), with unsupported words caught before generating. Sections are batched, about 3 s for four paragraphs on an RTX 5070 Ti, and a designed voice stays the same through a document.
 - **License badges look past wrong tags.** Fine-tunes of a non-commercial model inherit its license even when their own tag claims a permissive one.
 - **VoxCPM2 engine (optional).** One 5 GB model for voice cloning (with an optional style, and a clip transcript for closer likeness) and voice design, in 30 languages at 48 kHz. The two uses share one download and switch instantly. A designed voice stays the same through a whole document. VoxCPM runs in its own environment, which the app offers to install, and can add the same AI watermark.
@@ -43,7 +44,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - Sidebar pages (Generate, Voice, Model, Advanced, Log).
   - A light/dark theme that follows Windows, with depth and texture.
   - Plain-language controls: Expressiveness, Pacing, Variation, Take number.
-- **Models are grouped by what they do:** voice cloning, preset voices, voice design.
+- **Models are grouped by what they do:** cloning, presets, design and conversations, as tabs on the Model page.
 - **Text is split where a reader would pause:**
   - Never across paragraphs or headings.
   - Overlong sentences split at clause breaks, not mid-phrase.

@@ -143,6 +143,7 @@ import qwen_engine
 import kokoro_engine
 import voxcpm_engine
 import omnivoice_engine
+import vibevoice_engine
 import model_tiles
 import math
 import gc
@@ -205,11 +206,12 @@ QWEN_BACKEND = "qwen3"
 KOKORO_BACKEND = "kokoro"
 VOXCPM_BACKEND = "voxcpm"
 OMNIVOICE_BACKEND = "omnivoice"
+VIBEVOICE_BACKEND = "vibevoice"
 # Engines that run in their own environment (engines/<name>), installed on first use.
 ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine, VOXCPM_BACKEND: voxcpm_engine,
-                  OMNIVOICE_BACKEND: omnivoice_engine}
+                  OMNIVOICE_BACKEND: omnivoice_engine, VIBEVOICE_BACKEND: vibevoice_engine}
 WORKER_MODEL_TYPES = (qwen_engine.QwenModel, kokoro_engine.KokoroModel, voxcpm_engine.VoxCPMModel,
-                      omnivoice_engine.OmniVoiceModel)
+                      omnivoice_engine.OmniVoiceModel, vibevoice_engine.VibeVoiceModel)
 # One model that both clones and designs; its entries switch mode without reloading.
 DUAL_MODE_BACKENDS = {VOXCPM_BACKEND, OMNIVOICE_BACKEND}
 DUAL_MODE_TYPES = (voxcpm_engine.VoxCPMModel, omnivoice_engine.OmniVoiceModel)
@@ -235,6 +237,13 @@ ENGINE_INSTALL_NOTES = {
                                      "3 GB, shared by the voice cloning and voice design entries.\n\n"
                                      "Note: OmniVoice's weights are licensed CC BY-NC 4.0, for "
                                      "non-commercial use only."),
+    VIBEVOICE_BACKEND: ("VibeVoice", "VibeVoice runs in its own Python environment (engines/vibevoice) "
+                                     "because it needs a newer transformers than Chatterbox.\n\n"
+                                     "Installing downloads PyTorch (about 3 GB, or nothing if another "
+                                     "engine already cached it) plus about 1 GB of packages. The 1.5B "
+                                     "model is about 5 GB.\n\nNote: VibeVoice is MIT-licensed, but "
+                                     "Microsoft's model card limits it to research use and rules out "
+                                     "cloning anyone's voice without their recorded consent."),
 }
 
 
@@ -247,6 +256,8 @@ def languages_for_backend(backend):
         return dict(voxcpm_engine.LANGUAGE_LABELS)
     if backend == OMNIVOICE_BACKEND:
         return dict(omnivoice_engine.LANGUAGE_LABELS)
+    if backend == VIBEVOICE_BACKEND:
+        return dict(vibevoice_engine.LANGUAGE_LABELS)
     return get_supported_languages_for_backend(backend)
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
@@ -270,6 +281,8 @@ DEFAULT_SECONDS_PER_CHAR = {
     ("voxcpm", "cuda"): 0.07, ("voxcpm", "cpu"): 1.5,
     # OmniVoice batches: ~0.0035 s/char across a batch of 8 on an RTX 5070 Ti.
     ("omnivoice", "cuda"): 0.012, ("omnivoice", "cpu"): 0.5,
+    # VibeVoice 1.5B: 0.075-0.11 s/char on an RTX 5070 Ti (slower for longer sections).
+    ("vibevoice", "cuda"): 0.1, ("vibevoice", "cpu"): 2.0,
 }
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
@@ -534,6 +547,8 @@ class ModelLoaderThread(QThread):
                 model_instance = voxcpm_engine.load_voxcpm_model(self.repo_id, self.mode, log=print)
             elif self.backend == OMNIVOICE_BACKEND:
                 model_instance = omnivoice_engine.load_omnivoice_model(self.repo_id, self.mode, log=print)
+            elif self.backend == VIBEVOICE_BACKEND:
+                model_instance = vibevoice_engine.load_vibevoice_model(self.repo_id, log=print)
             else:
                 model_instance = load_chatterbox_model(
                     self.repo_id,
@@ -652,7 +667,8 @@ class AudioGeneratorThread(QThread):
                 self.set_seed_internal(self.input_seed)
 
             max_chars = getattr(self.model, "max_section_chars", MAX_TEXT_INPUT_LENGTH)
-            planned = documents.plan_sections(self.original_text, max_chars)
+            planner = getattr(self.model, "plan_sections", None)
+            planned = planner(self.original_text) if planner else documents.plan_sections(self.original_text, max_chars)
             if self.preview:
                 planned = planned[:PREVIEW_MAX_SECTIONS]
             final_chunks = [section.text for section in planned]
@@ -1054,7 +1070,8 @@ class FindModelsDialog(QDialog):
     """Search Hugging Face for repos this app can load and pick one to add."""
 
     ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"),
-                      ("Kokoro", "kokoro"), ("VoxCPM", "voxcpm"), ("OmniVoice", "omnivoice"))
+                      ("Kokoro", "kokoro"), ("VoxCPM", "voxcpm"), ("OmniVoice", "omnivoice"),
+                      ("VibeVoice", "vibevoice"))
 
     def __init__(self, token, existing_repos, parent=None):
         super().__init__(parent)
@@ -1366,6 +1383,68 @@ class ModelEntryDialog(QDialog):
             self.adjustSize()
             return
         self.accept()
+
+
+class CastDialog(QDialog):
+    """Pick a voice for each speaker in a conversation script."""
+
+    BROWSE = "__browse__"
+
+    def __init__(self, speakers, cast, sample_paths, recordings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Cast")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        intro = QLabel("Choose a voice for each speaker in the script. Sample voices come with "
+                       "VibeVoice; your recordings and any clip work too. Only clone voices of "
+                       "people who have agreed to it.")
+        intro.setObjectName("Muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        self.combos = {}
+        for row, speaker in enumerate(speakers):
+            grid.addWidget(QLabel(speaker), row, 0)
+            combo = QComboBox()
+            for name, path in sample_paths.items():
+                combo.addItem(f"{name}  (sample)", path)
+            if recordings:
+                combo.insertSeparator(combo.count())
+                for path in recordings:
+                    combo.addItem(os.path.basename(path), path)
+            combo.insertSeparator(combo.count())
+            combo.addItem("Other clip\u2026", self.BROWSE)
+            current = cast.get(speaker)
+            if current and combo.findData(current) < 0:
+                combo.insertItem(combo.count() - 2, os.path.basename(current), current)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+            combo.setProperty("previous", combo.currentIndex())
+            combo.activated.connect(lambda _index, combo=combo: self._maybe_browse(combo))
+            grid.addWidget(combo, row, 1)
+            self.combos[speaker] = combo
+        layout.addLayout(grid)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _maybe_browse(self, combo):
+        if combo.currentData() != self.BROWSE:
+            combo.setProperty("previous", combo.currentIndex())
+            return
+        path, _filter = QFileDialog.getOpenFileName(self, "Choose a voice clip", "",
+                                                    "Audio Files (*.wav *.mp3 *.flac)")
+        if path:
+            combo.insertItem(combo.count() - 2, os.path.basename(path), path)
+            combo.setCurrentIndex(combo.count() - 3)
+            combo.setProperty("previous", combo.currentIndex())
+        else:
+            combo.setCurrentIndex(combo.property("previous") or 0)
+
+    def result_cast(self):
+        return {speaker: combo.currentData() for speaker, combo in self.combos.items()
+                if combo.currentData() and combo.currentData() != self.BROWSE}
 
 
 class EngineInstallThread(QThread):
@@ -1715,6 +1794,18 @@ class ChatterboxApp(QMainWindow):
         self.qwen_transcript_input.editingFinished.connect(self.save_reference_transcript)
         qwen_row_layout.addWidget(self.qwen_transcript_label)
         qwen_row_layout.addWidget(self.qwen_transcript_input, 1)
+        self.cast_label = QLabel()
+        self.cast_label.setObjectName("Muted")
+        self.cast_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.cast_button = QPushButton("Cast\u2026")
+        self.cast_button.setToolTip("Choose a voice for each speaker in the script.")
+        self.cast_button.clicked.connect(self.edit_cast)
+        self.cast_title = QLabel("Speakers")
+        for widget in (self.cast_title, self.cast_label, self.cast_button):
+            widget.setVisible(False)
+        qwen_row_layout.addWidget(self.cast_title)
+        qwen_row_layout.addWidget(self.cast_label, 1)
+        qwen_row_layout.addWidget(self.cast_button)
         self.qwen_watermark_checkbox = QCheckBox("Add AI watermark")
         self.qwen_watermark_checkbox.setChecked(bool(qwen_settings.get("watermark", True)))
         self.qwen_watermark_checkbox.setToolTip(
@@ -1724,6 +1815,7 @@ class ChatterboxApp(QMainWindow):
         self.kokoro_settings = self.app_settings.get("kokoro", {})
         self.voxcpm_settings = self.app_settings.get("voxcpm", {})
         self.omnivoice_settings = self.app_settings.get("omnivoice", {})
+        self.vibevoice_settings = self.app_settings.get("vibevoice", {})
         self.qwen_row.setVisible(False)
         self.qwen_watermark_checkbox.setVisible(False)
 
@@ -1975,9 +2067,9 @@ class ChatterboxApp(QMainWindow):
         self.capability_tabs.setUsesScrollButtons(False)
         self.capability_tabs.setCursor(Qt.CursorShape.PointingHandCursor)
         for key, (title, description) in model_registry.CAPABILITIES.items():
-            index = self.capability_tabs.addTab(title)
+            index = self.capability_tabs.addTab(model_registry.CAPABILITY_TABS[key])
             self.capability_tabs.setTabData(index, key)
-            self.capability_tabs.setTabToolTip(index, description)
+            self.capability_tabs.setTabToolTip(index, f"{title}: {description}")
         self.capability_tabs.currentChanged.connect(lambda _index: self.render_model_tiles())
         tabs_row.addWidget(self.capability_tabs)
         tabs_row.addStretch(1)
@@ -2331,8 +2423,7 @@ class ChatterboxApp(QMainWindow):
         if selected:
             return selected
         entry = self.loaded_entry() or self.get_selected_model_entry()
-        sections = documents.split_into_sections(
-            self.text_input.toPlainText(), self.max_section_chars_for(entry))
+        sections = self.split_text(self.text_input.toPlainText(), entry)
         return sections[0] if sections else ""
 
     def start_generation(self, preview=False):
@@ -2495,9 +2586,15 @@ class ChatterboxApp(QMainWindow):
             return ENGINE_MODULES[entry["backend"]].MAX_SECTION_CHARS
         return MAX_TEXT_INPUT_LENGTH
 
+    def split_text(self, text, entry):
+        """Section texts the way the entry's engine will generate them."""
+        if entry.get("backend") == VIBEVOICE_BACKEND:
+            return [section.text for section in
+                    documents.plan_script_sections(text, vibevoice_engine.MAX_SECTION_CHARS)]
+        return documents.split_into_sections(text, self.max_section_chars_for(entry))
+
     def section_lengths(self, text, entry):
-        return [len(section) for section in
-                documents.split_into_sections(text, self.max_section_chars_for(entry))]
+        return [len(section) for section in self.split_text(text, entry)]
 
     def model_estimates(self, text):
         """[(entry, seconds, measured, active)] for every model in the switcher, fastest first."""
@@ -2505,7 +2602,7 @@ class ChatterboxApp(QMainWindow):
         active_key = self.loaded_entry_key() if self.model is not None else None
         lengths_by_size = {}
         for entry in self.get_visible_model_entries():
-            size = self.max_section_chars_for(entry)
+            size = (self.max_section_chars_for(entry), entry.get("backend") == VIBEVOICE_BACKEND)
             if size not in lengths_by_size:
                 lengths_by_size[size] = self.section_lengths(text, entry)
             seconds, measured = self.estimate_seconds(entry, lengths_by_size[size])
@@ -2515,6 +2612,7 @@ class ChatterboxApp(QMainWindow):
     def update_text_stats(self):
         # Always current, including while a preview or render runs; a running
         # render keeps using the text it started with.
+        self.refresh_cast_label()
         text = self.text_input.toPlainText().strip()
         if not text:
             self.estimate_button.setVisible(False)
@@ -2633,6 +2731,8 @@ class ChatterboxApp(QMainWindow):
             return self.voxcpm_settings
         if isinstance(model, omnivoice_engine.OmniVoiceModel):
             return self.omnivoice_settings
+        if isinstance(model, vibevoice_engine.VibeVoiceModel):
+            return self.vibevoice_settings
         return self.qwen_settings
 
     def fill_speaker_combo(self, model):
@@ -2698,11 +2798,22 @@ class ChatterboxApp(QMainWindow):
             for widget in (self.qwen_transcript_label, self.qwen_transcript_input):
                 widget.setVisible(mode == "base")
             self.design_attributes_button.setVisible(omnivoice and mode == "voice_design")
+            conversation = mode == "conversation"
+            for widget in (self.cast_title, self.cast_label, self.cast_button):
+                widget.setVisible(conversation)
+            if conversation:
+                self.refresh_cast_label()
             self.qwen_transcript_input.setPlaceholderText(
                 "What is said in the reference clip (required by OmniVoice)" if omnivoice else
                 "What is said in the reference clip (optional, improves likeness)")
         else:
             self.design_attributes_button.setVisible(False)
+            for widget in (self.cast_title, self.cast_label, self.cast_button):
+                widget.setVisible(False)
+        self.text_input.setPlaceholderText(
+            vibevoice_engine.SCRIPT_HINT if qwen is not None and qwen.mode == "conversation" else
+            "Enter text to synthesize, or open a document. Long text is split where a reader "
+            "would pause and stitched back together.")
         self.refresh_voice_chip()
         if self.isVisible():
             self.update_minimum_size()
@@ -2710,7 +2821,11 @@ class ChatterboxApp(QMainWindow):
     def refresh_voice_chip(self):
         qwen = self.active_qwen_model()
         reference = self.ref_audio_path_label.toolTip()
-        if qwen is not None and qwen.mode in ("custom_voice", "preset"):
+        if qwen is not None and qwen.mode == "conversation":
+            speakers = self.script_speakers()
+            text = f"Cast: {len(speakers)} voice{'s' if len(speakers) != 1 else ''}"
+            tip = "Each speaker in the script has their own voice. Change them with Cast\u2026 in Delivery."
+        elif qwen is not None and qwen.mode in ("custom_voice", "preset"):
             name = self.qwen_speaker_combo.currentText().split(" (")[0]
             text = f"Preset: {name or 'speaker'}"
             tip = "A built-in voice. Reference clips aren't used by this model."
@@ -2736,6 +2851,17 @@ class ChatterboxApp(QMainWindow):
             return "Describe the voice you want (Voice description, in the Delivery card) first."
         if qwen.mode == "base" and not self.ref_audio_path_label.toolTip():
             return "Choose a reference clip on the Voice page; this cloning model needs one."
+        if isinstance(qwen, vibevoice_engine.VibeVoiceModel):
+            speakers = self.script_speakers()
+            if len(speakers) > vibevoice_engine.MAX_SPEAKERS:
+                return (f"VibeVoice handles up to {vibevoice_engine.MAX_SPEAKERS} speakers; this script has "
+                        f"{len(speakers)}: {', '.join(speakers)}.")
+            qwen.cast = self.current_cast(speakers)
+            qwen.watermark = self.qwen_watermark_checkbox.isChecked()
+            qwen.begin_run()
+            self.vibevoice_settings["watermark"] = qwen.watermark
+            self.app_settings["vibevoice"] = self.vibevoice_settings
+            return None
         if isinstance(qwen, omnivoice_engine.OmniVoiceModel):
             if qwen.mode == "base" and not self.qwen_transcript_input.text().strip():
                 return ("OmniVoice needs the Clip transcript: type exactly what is said in the "
@@ -2765,6 +2891,56 @@ class ChatterboxApp(QMainWindow):
             settings["speaker"] = qwen.speaker
             self.app_settings["qwen"] = settings
         return None
+
+    # --- Conversations (VibeVoice) ---
+
+    def script_speakers(self):
+        return documents.script_speakers(documents.parse_script(self.text_input.toPlainText()))
+
+    def current_cast(self, speakers):
+        model = self.active_qwen_model()
+        samples = getattr(model, "sample_paths", {}) or {}
+        return vibevoice_engine.resolve_cast(speakers, self.vibevoice_settings.get("cast", {}), samples)
+
+    def refresh_cast_label(self):
+        model = self.active_qwen_model()
+        if not isinstance(model, vibevoice_engine.VibeVoiceModel):
+            return
+        speakers = self.script_speakers()
+        cast = self.current_cast(speakers)
+        parts = [f"{speaker} \u2192 {vibevoice_engine.voice_name(cast[speaker], model.sample_paths)}"
+                 for speaker in speakers if speaker in cast]
+        text = " \u00b7 ".join(parts) if parts else "Write lines like \u201cLinda: Hello.\u201d"
+        if len(speakers) > vibevoice_engine.MAX_SPEAKERS:
+            text = f"{len(speakers)} speakers: VibeVoice handles up to {vibevoice_engine.MAX_SPEAKERS}"
+        self.cast_label.setText(text)
+        self.cast_label.setToolTip("\n".join(f"{speaker}: {cast.get(speaker, '')}" for speaker in speakers))
+        self.refresh_voice_chip()
+
+    def edit_cast(self):
+        model = self.active_qwen_model()
+        if not isinstance(model, vibevoice_engine.VibeVoiceModel):
+            return
+        speakers = self.script_speakers()[:vibevoice_engine.MAX_SPEAKERS]
+        if not speakers:
+            QMessageBox.information(self, "Cast", "Write the script first, one speaker per line, e.g.\n\n"
+                                    + vibevoice_engine.SCRIPT_HINT.split("\n", 1)[1])
+            return
+        recordings = []
+        if os.path.isdir(self.recordings_directory):
+            recordings = sorted((os.path.join(self.recordings_directory, name)
+                                 for name in os.listdir(self.recordings_directory)
+                                 if name.lower().endswith(".wav")), key=os.path.getmtime, reverse=True)
+        reference = self.ref_audio_path_label.toolTip()
+        if reference and reference not in recordings:
+            recordings.insert(0, reference)
+        dialog = CastDialog(speakers, self.current_cast(speakers), model.sample_paths, recordings, self)
+        if dialog_accepted(dialog.exec()):
+            chosen = dict(self.vibevoice_settings.get("cast", {}))
+            chosen.update(dialog.result_cast())
+            self.vibevoice_settings["cast"] = chosen
+            self.app_settings["vibevoice"] = self.vibevoice_settings
+            self.refresh_cast_label()
 
     @staticmethod
     def transcript_path(audio_path):
@@ -3096,7 +3272,7 @@ class ChatterboxApp(QMainWindow):
                   in model_registry.group_by_capability(self.model_entries)}
         for index in range(self.capability_tabs.count()):
             capability = self.capability_tabs.tabData(index)
-            title = model_registry.CAPABILITIES[capability][0]
+            title = model_registry.CAPABILITY_TABS[capability]
             count = len(groups.get(capability, []))
             self.capability_tabs.setTabText(index, f"{title}  {count}" if count else title)
         capability = self.current_capability()
@@ -3557,7 +3733,7 @@ class ChatterboxApp(QMainWindow):
             self.language_combo.setCurrentIndex(preferred_index)
 
         is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND, KOKORO_BACKEND,
-                                                            *DUAL_MODE_BACKENDS)
+                                                            VIBEVOICE_BACKEND, *DUAL_MODE_BACKENDS)
         self.language_combo.setEnabled(is_multilingual)
         self.language_combo.setToolTip(
             "Language used by the multilingual Chatterbox backend."

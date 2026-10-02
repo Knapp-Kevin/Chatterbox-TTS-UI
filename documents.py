@@ -118,6 +118,70 @@ def split_into_sections(text, max_len=MAX_SECTION_LENGTH):
     return [section.text for section in plan_sections(text, max_len)]
 
 
+# ---------- conversation scripts ----------
+
+# "Linda: Hello there." or "[Linda]: Hello there." A name is up to 30 characters,
+# starts with a letter, and holds no sentence punctuation. The colon must be
+# followed by a space, so times like "10:30" aren't mistaken for speakers.
+SPEAKER_LINE = re.compile(r"^\s*\[?(?P<name>[^\W\d_][\w .'\-]{0,29}?)\]?\s*:\s+(?P<text>\S.*)$")
+DEFAULT_SPEAKER = "Speaker 1"
+
+
+def parse_script(text):
+    """[(speaker, text)] turns. A "Name:" line starts a turn; other lines continue the
+    current turn; text before any name belongs to "Speaker 1"."""
+    turns = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        match = SPEAKER_LINE.match(line)
+        if match:
+            turns.append([match.group("name").strip(), match.group("text").strip()])
+        elif turns:
+            turns[-1][1] += " " + line
+        else:
+            turns.append([DEFAULT_SPEAKER, line])
+    return [(speaker, words) for speaker, words in turns if words]
+
+
+def script_speakers(turns):
+    """Speaker names in order of first appearance."""
+    names = []
+    for speaker, _words in turns:
+        if speaker not in names:
+            names.append(speaker)
+    return names
+
+
+def plan_script_sections(text, max_len):
+    """Sections of whole turns ("Name: text" lines) up to max_len characters, so a
+    conversation is only ever split between turns. A turn longer than max_len is
+    split at sentence breaks, each part keeping its speaker."""
+    lines = []
+    for speaker, words in parse_script(text):
+        budget = max(40, max_len - len(speaker) - 2)
+        parts, group = [], ""
+        for sentence in (s.strip() for s in nltk.sent_tokenize(words)):
+            for piece in ([sentence] if len(sentence) <= budget else _split_long_sentence(sentence, budget)):
+                if group and len(group) + 1 + len(piece) > budget:
+                    parts.append(group)
+                    group = ""
+                group = f"{group} {piece}".strip()
+        if group:
+            parts.append(group)
+        lines.extend(f"{speaker}: {part}" for part in parts)
+    sections, current = [], []
+    for line in lines:
+        if current and sum(len(item) + 1 for item in current) + len(line) > max_len:
+            sections.append(Section("\n".join(current), PARAGRAPH))
+            current = []
+        current.append(line)
+    if current:
+        sections.append(Section("\n".join(current), END))
+    return sections
+
+
 def plan_batches(lengths, max_count, char_budget=None):
     """Group consecutive sections into batches of at most max_count sections, and,
     when char_budget is set, at most char_budget characters counted as

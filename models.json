@@ -122,6 +122,18 @@
       "license": "cc-by-nc-4.0",
       "download_bytes": 3267470260,
       "mode": "design"
+    },
+    {
+      "repo_id": "vibevoice/VibeVoice-1.5B-hf",
+      "label": "VibeVoice conversations",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Scripts with up to 4 speakers, each cloned from a clip. Research use (see the model card).",
+      "backend": "vibevoice",
+      "language_id": "en",
+      "license": "mit-research",
+      "download_bytes": 5419780921
     }
   ]
 }

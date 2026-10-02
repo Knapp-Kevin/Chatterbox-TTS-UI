@@ -42,7 +42,12 @@ WEIGHT_LICENSES = {
 
 # Engines whose every public checkpoint derives from non-commercial weights, so any repo
 # with that layout is treated as non-commercial whatever its tag says.
-ENGINE_WEIGHT_LICENSES = {"omnivoice": "cc-by-nc-4.0"}
+ENGINE_WEIGHT_LICENSES = {
+    "omnivoice": "cc-by-nc-4.0",
+    # MIT-licensed, but Microsoft's model card limits VibeVoice to research use and
+    # recommends against commercial use; shown as "Research use", not a green MIT badge.
+    "vibevoice": "mit-research",
+}
 
 
 def resolve_license(repo_id, tags=None, declared="", backend=None):
@@ -82,6 +87,8 @@ def license_badge(license_id):
     if ("nc" in license_id.split("-") or "non-commercial" in license_id
             or "cpml" in license_id or "coqui" in license_id):
         return "noncommercial", "Non-commercial"
+    if license_id == "mit-research":
+        return "unknown", "Research use"
     if not license_id or license_id == "other":
         return "unknown", "License ?"
     return "unknown", "License ?"
@@ -132,6 +139,14 @@ ENGINES = {
                     "transcript for closer likeness) and voice design from a description. 30 "
                     "languages, 48 kHz output. Runs in its own environment (Apache-2.0).",
         languages_summary="30 languages",
+    ),
+    "vibevoice": Engine(
+        key="vibevoice",
+        label="VibeVoice",
+        description="Microsoft's model for natural conversations: a script with up to 4 speakers, "
+                    "each cloned from a clip. MIT license, but the model card limits it to research "
+                    "use. Runs in its own environment.",
+        languages_summary="English and Chinese",
     ),
     "omnivoice": Engine(
         key="omnivoice",
@@ -189,6 +204,8 @@ def key_weight_file(entry):
         return "t3_cfg.safetensors"
     if entry.get("backend") in ("qwen3", "voxcpm", "omnivoice"):
         return "model.safetensors"
+    if entry.get("backend") == "vibevoice":
+        return "model.safetensors.index.json"  # plus its shards, checked in is_downloaded
     if entry.get("backend") == "kokoro":
         return "config.json"  # plus a .pth, checked in is_downloaded
     return weights_file(entry)
@@ -199,7 +216,10 @@ CAPABILITIES = {
     "clone": ("Voice cloning", "Speak in the voice of a reference clip from the Voice page."),
     "preset": ("Preset voices", "Pick a built-in speaker; some models also take a style."),
     "design": ("Voice design", "Describe a voice in words and the model creates it."),
+    "conversation": ("Conversations", "Scripts with up to 4 speakers, each in their own voice."),
 }
+# Short labels for the Model page tabs, so four tabs fit the narrowest window.
+CAPABILITY_TABS = {"clone": "Cloning", "preset": "Presets", "design": "Design", "conversation": "Conversations"}
 QWEN_CAPABILITY = {"base": "clone", "custom_voice": "preset", "voice_design": "design"}
 
 
@@ -210,6 +230,8 @@ def capability_for(entry):
         return "preset"
     if entry.get("backend") in DUAL_MODE_ENGINES:
         return entry_mode(entry)
+    if entry.get("backend") == "vibevoice":
+        return "conversation"
     return "clone"  # Chatterbox clones, or uses its built-in voice with no clip
 
 
@@ -286,6 +308,10 @@ def is_downloaded(entry):
         return False
     if entry.get("backend") == "kokoro":
         return any(name.endswith(".pth") for name in os.listdir(os.path.dirname(cached)))
+    if entry.get("backend") == "vibevoice":
+        with open(cached, encoding="utf-8") as handle:
+            shards = set(json.load(handle).get("weight_map", {}).values())
+        return all(os.path.exists(os.path.join(os.path.dirname(cached), shard)) for shard in shards)
     return True
 
 
@@ -309,6 +335,11 @@ def hardware_needs(backend, repo_id=""):
     """Rough GPU memory needs, measured on an RTX 5070 Ti where noted."""
     if backend == "kokoro":
         return HardwareNeeds(2, 2, True, "Small model; also quick on a CPU.")
+    if backend == "vibevoice":
+        if (_billions(repo_id) or 1.5) >= 5 or "7b" in (repo_id or "").lower() or "large" in (repo_id or "").lower():
+            return HardwareNeeds(20, 24, False, "The 7B model needs a 24 GB GPU. Very slow on a CPU.")
+        return HardwareNeeds(8, 10, False, "Peaks around 6.2 GB for a short exchange, more for long "
+                                           "sections. Very slow on a CPU.")
     if backend == "omnivoice":
         return HardwareNeeds(3, 4, False, "Peaks around 2.1 GB for one section and 3.4 GB for a "
                                           "batch of 8. Not tested on a CPU.")
@@ -378,6 +409,12 @@ def check_repo(repo_id, token=None):
         files = ENGINE_FILES["multilingual"] + ([WEIGHT_VERSIONS[best]] if best else ["t3_23lang.safetensors"])
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
+    elif _is_vibevoice_layout(sizes, repo_id):
+        download = sum(size for name, size in sizes.items() if not name.startswith("figures/"))
+        access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
+        return RepoCheck(True, f"Found: VibeVoice · about {format_size(download)} to download · {access}",
+                         "vibevoice", (), download, gated, private, "",
+                         resolve_license(repo_id, backend="vibevoice"))
     elif _is_omnivoice_layout(sizes, getattr(info, "tags", None)):
         download = sum(sizes.values())
         access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
@@ -438,6 +475,16 @@ def _is_voxcpm_layout(files):
 def _is_kokoro_layout(files):
     return ("config.json" in files and any(name.endswith(".pth") and "/" not in name for name in files)
             and any(KOKORO_VOICE.match(name) for name in files))
+
+
+def _is_vibevoice_layout(files, repo_id):
+    """Transformers-format VibeVoice repos (the "-hf" conversions): a processor and chat
+    template beside sharded weights. Microsoft's original-format repos, ASR and
+    realtime models load differently and are skipped."""
+    name = (repo_id or "").lower()
+    return ("vibevoice" in name and not any(word in name for word in ("asr", "realtime", "streaming"))
+            and "chat_template.jinja" in files and "processor_config.json" in files
+            and "model.safetensors.index.json" in files)
 
 
 def _check_qwen_repo(repo_id, token, sizes, gated, private):
@@ -511,6 +558,9 @@ def _classify(model):
         size = "0.6B " if "0.6b" in model.id.lower() else "1.7B " if "1.7b" in model.id.lower() else ""
         label = QWEN_VARIANTS.get(variant, "variant confirmed by Check").lower()
         return "qwen3", variant, f"Qwen3-TTS {size}· {label}"
+    if _is_vibevoice_layout(files, model.id):
+        size = "7B" if "7b" in model.id.lower() else "1.5B" if "1.5b" in model.id.lower() else ""
+        return "vibevoice", "", f"VibeVoice {size} · conversations".replace("  ", " ")
     if _is_omnivoice_layout(files, tags):
         return "omnivoice", "", "OmniVoice · cloning and voice design"
     if _is_voxcpm_layout(files):
@@ -536,6 +586,8 @@ def search_models(query="", engine="all", token=None, limit=40):
         listings.append(dict(filter="qwen3_tts", search=query or None))
         if query:
             listings.append(dict(search=query))
+    if engine in ("all", "vibevoice"):
+        listings.append(dict(search=f"vibevoice {query}".strip() if query else "vibevoice"))
     if engine in ("all", "omnivoice"):
         listings.append(dict(search=f"omnivoice {query}".strip() if query else "omnivoice"))
     if engine in ("all", "voxcpm"):
