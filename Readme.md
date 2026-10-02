@@ -70,6 +70,7 @@ Windows remains the primary maintained path.
     *   Sidebar layout with **Generate**, **Voice**, **Model** and **Log** pages, and a light/dark theme (amber accent) that follows the Windows app mode.
     *   Plain-language delivery controls: Expressiveness (exaggeration), Pacing (CFG weight), Variation (temperature) and Take number (seed); hover any control for details.
     *   **Finishing touches** (applied after generation): speed and pitch (FFmpeg Rubber Band with formant preservation when available, librosa otherwise), pause between long-text sections, even-out volume, silence trimming, and WAV/FLAC/MP3 output. Settings are remembered between sessions.
+    *   **Documents:** open `.txt`, `.md` or `.docx` files, see the character count, section count and an estimated generation time (learned from your own runs), and **Preview** a short sample (your selection, or the opening section) before rendering everything. *Keep this take* locks the preview's take number so the full render matches. Long renders show section progress with time remaining, and **Stop** saves the finished sections as a `_partial` file.
     *   Text input for speech synthesis.
     *   Load reference audio files (`.wav`, `.mp3`, `.flac`) for voice cloning.
     *   Record a reference clip from a microphone directly in the app.

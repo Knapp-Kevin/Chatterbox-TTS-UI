@@ -136,8 +136,9 @@ from PySide6.QtMultimedia import (
 from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
 import ui_theme
 import audio_effects
-from collections import deque
+import documents
 import time
+from collections import deque
 import wave
 
 try:
@@ -189,14 +190,16 @@ resolve_multilingual_t3_model = getattr(
     ).strip(),
 )
 
-MAX_TEXT_INPUT_LENGTH = 280
-EFFECTIVE_MAX_CHUNK_LENGTH = MAX_TEXT_INPUT_LENGTH - 20
+MAX_TEXT_INPUT_LENGTH = documents.MAX_SECTION_LENGTH
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
 REFERENCE_RECORDINGS_DIRNAME = "reference_recordings"
 RECORDING_SAMPLE_RATE = 48000
 MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
+PREVIEW_MAX_SECTIONS = 2
+# Initial generation-speed guesses (seconds per character), refined by measurement.
+DEFAULT_SECONDS_PER_CHAR = {"cuda": 0.045, "cpu": 0.35}
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
 # every English vowel, diphthong and consonant (including the rarer "zh",
@@ -501,9 +504,14 @@ class AudioGeneratorThread(QThread):
         min_p=0.05,
         top_p=1.0,
         finishing=None,
+        output_name=None,
+        preview=False,
     ):
         super().__init__()
         self.finishing = finishing or audio_effects.FinishingSettings()
+        self.output_name = output_name
+        self.preview = preview
+        self.partial_info = None
         self.model = model
         self.original_text = text
         self.audio_prompt_path = audio_prompt_path
@@ -537,26 +545,6 @@ class AudioGeneratorThread(QThread):
         print(f"Seed set to: {seed_val}")
         self.actual_seed_used = seed_val
 
-    def _chunk_long_sentence(self, sentence, max_len):
-        sub_chunks = []
-        current_pos = 0
-        sentence_len = len(sentence)
-        while current_pos < sentence_len:
-            end_pos = min(current_pos + max_len, sentence_len)
-            if end_pos == sentence_len:
-                sub_chunks.append(sentence[current_pos:end_pos].strip())
-                current_pos = end_pos
-            else:
-                last_space_idx = sentence.rfind(' ', current_pos, end_pos)
-                if last_space_idx != -1 and last_space_idx > current_pos:
-                    sub_chunks.append(
-                        sentence[current_pos:last_space_idx].strip())
-                    current_pos = last_space_idx + 1
-                else:
-                    sub_chunks.append(sentence[current_pos:end_pos].strip())
-                    current_pos = end_pos
-        return [sc for sc in sub_chunks if sc]
-
     def run(self):
         try:
             if nltk is None or not NLTK_RESOURCES_OK:
@@ -578,38 +566,10 @@ class AudioGeneratorThread(QThread):
             else:
                 self.set_seed_internal(self.input_seed)
 
-            final_chunks = []
-            text_to_process = self.original_text.strip()
             print("Using NLTK for sentence tokenization/combining...")
-            sentences = nltk.sent_tokenize(text_to_process)
-            current_chunk_sents = []
-            current_chunk_len = 0
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-                if len(sentence) > MAX_TEXT_INPUT_LENGTH:
-                    if current_chunk_sents:
-                        final_chunks.append(" ".join(current_chunk_sents))
-                    current_chunk_sents = []
-                    current_chunk_len = 0
-                    print(f"Sentence too long ({len(sentence)}), sub-chunking.")
-                    final_chunks.extend(self._chunk_long_sentence(
-                        sentence, EFFECTIVE_MAX_CHUNK_LENGTH))
-                    continue
-                potential_len = current_chunk_len + \
-                    (1 if current_chunk_sents else 0) + len(sentence)
-                if potential_len <= MAX_TEXT_INPUT_LENGTH:
-                    current_chunk_sents.append(sentence)
-                    current_chunk_len = potential_len
-                else:
-                    if current_chunk_sents:
-                        final_chunks.append(" ".join(current_chunk_sents))
-                    current_chunk_sents = [sentence]
-                    current_chunk_len = len(sentence)
-            if current_chunk_sents:
-                final_chunks.append(" ".join(current_chunk_sents))
-            final_chunks = [c.strip() for c in final_chunks if c.strip()]
+            final_chunks = documents.split_into_sections(self.original_text)
+            if self.preview:
+                final_chunks = final_chunks[:PREVIEW_MAX_SECTIONS]
 
             if not final_chunks:
                 self.error_occurred.emit(
@@ -624,6 +584,11 @@ class AudioGeneratorThread(QThread):
             sr = self.model.sr
             for i, chunk_text in enumerate(final_chunks):
                 if self._is_stopped:
+                    if all_audio_tensors and not self.preview:
+                        # Keep the finished sections of a long render.
+                        self.partial_info = (i, total_chunks)
+                        print(f"Stopped at section {i + 1}/{total_chunks}; saving {i} finished sections.")
+                        break
                     self.error_occurred.emit(
                         f"Generation stopped by user at chunk {i+1}/{total_chunks}.")
                     return
@@ -647,7 +612,7 @@ class AudioGeneratorThread(QThread):
                     wav_tensor_chunk = wav_tensor_chunk.unsqueeze(0)
                 all_audio_tensors.append(wav_tensor_chunk.cpu())
 
-            if self._is_stopped:
+            if self._is_stopped and self.partial_info is None and len(all_audio_tensors) < total_chunks:
                 self.error_occurred.emit("Stopped before final concat.")
                 return
             if not all_audio_tensors:
@@ -661,9 +626,17 @@ class AudioGeneratorThread(QThread):
             print(f"Applying finishing touches: {finishing.summary()}")
             final_audio = audio_effects.apply_finishing(final_audio, sr, finishing)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_base = os.path.join(
-                self.output_dir,
-                f"chatterbox_{timestamp}_seed{self.actual_seed_used}_full_stitched")
+            if self.preview:
+                output_dir = os.path.join(self.output_dir, "previews")
+                os.makedirs(output_dir, exist_ok=True)
+                file_stem = f"preview_{timestamp}_seed{self.actual_seed_used}"
+            else:
+                output_dir = self.output_dir
+                prefix = self.output_name or "chatterbox"
+                suffix = "_partial" if self.partial_info else (
+                    "" if self.output_name else "_full_stitched")
+                file_stem = f"{prefix}_{timestamp}_seed{self.actual_seed_used}{suffix}"
+            output_base = os.path.join(output_dir, file_stem)
             output_path = audio_effects.save_audio(
                 output_base, final_audio, sr, finishing.output_format)
             print(f"Final stitched audio saved to: {output_path}")
@@ -1023,6 +996,15 @@ class ChatterboxApp(QMainWindow):
             self.update_generation_time_display)  # Renamed for clarity
         self.generation_start_time = None
         self.is_generating = False
+        self.generation_is_preview = False
+        self.generation_started_at = None
+        self.generation_char_count = 0
+        self.current_document_name = None
+        self.last_preview_seed = None
+        self.text_stats_timer = QTimer(self)
+        self.text_stats_timer.setSingleShot(True)
+        self.text_stats_timer.setInterval(350)
+        self.text_stats_timer.timeout.connect(self.update_text_stats)
         self.repetition_penalty = 1.2
         self.min_p = 0.05
         self.top_p = 1.0
@@ -1145,22 +1127,58 @@ class ChatterboxApp(QMainWindow):
             f"~{MAX_TEXT_INPUT_LENGTH} characters and stitched together."
         )
         self.text_input.setMinimumHeight(90)
+        self.text_input.setAcceptRichText(False)
+        self.text_input.textChanged.connect(self.on_text_changed)
         # Fill the leftover height instead of forcing the page to scroll.
         self.text_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         text_card_layout.addWidget(self.text_input, 1)
 
+        text_status_row = QHBoxLayout()
+        text_status_row.setSpacing(10)
+        self.text_stats_label = QLabel()
+        self.text_stats_label.setObjectName("Muted")
+        self.text_stats_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.text_stats_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_status_row.addWidget(self.text_stats_label, 1)
+        self.generation_progress = QProgressBar()
+        self.generation_progress.setTextVisible(False)
+        self.generation_progress.setFixedHeight(8)
+        self.generation_progress.setFixedWidth(120)
+        self.generation_progress.setVisible(False)
+        text_status_row.addWidget(self.generation_progress)
+        self.keep_take_button = self._link(QPushButton("Keep this take"))
+        self.keep_take_button.setToolTip(
+            "Lock the take number used by the preview so the full render matches it.")
+        self.keep_take_button.clicked.connect(self.keep_preview_take)
+        self.keep_take_button.setVisible(False)
+        text_status_row.addWidget(self.keep_take_button)
+        status_row_widget = QWidget()
+        status_row_widget.setLayout(text_status_row)
+        text_status_row.setContentsMargins(0, 0, 0, 0)
+        status_row_widget.setFixedHeight(QPushButton("X").sizeHint().height())
+        text_card_layout.addWidget(status_row_widget)
+
         generate_actions_layout = QHBoxLayout()
-        self.autoplay_checkbox = QCheckBox("Auto-play generated audio")
-        self.autoplay_checkbox.setChecked(True)
-        generate_actions_layout.addWidget(self.autoplay_checkbox)
-        generate_actions_layout.addStretch()
-        self.use_preset_button = QPushButton("Use Test Preset")
+        self.open_document_button = QPushButton("Open document...")
+        self.open_document_button.setToolTip("Load a .txt, .md or .docx file to read aloud.")
+        self.open_document_button.clicked.connect(self.open_document)
+        generate_actions_layout.addWidget(self.open_document_button)
+        self.use_preset_button = QPushButton("Sample text")
+        self.use_preset_button.setToolTip("Fill in a short test sentence for the selected language.")
         self.use_preset_button.clicked.connect(self.apply_selected_text_preset)
         generate_actions_layout.addWidget(self.use_preset_button)
+        generate_actions_layout.addStretch()
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.setToolTip(
+            "Generate a short sample with the current settings before rendering everything: "
+            "the selected text, or the opening section if nothing is selected.")
+        self.preview_button.clicked.connect(lambda: self.start_generation(preview=True))
+        self.preview_button.setEnabled(False)
+        generate_actions_layout.addWidget(self.preview_button)
         self.generate_button = self._accent(QPushButton("Generate Audio"))
         self.generate_button.clicked.connect(self.handle_generate_stop_toggle)
         self.generate_button.setEnabled(False)
-        self.generate_button.setMinimumWidth(180)
+        self.generate_button.setMinimumWidth(160)
         generate_actions_layout.addWidget(self.generate_button)
         text_card_layout.addLayout(generate_actions_layout)
         generate_layout.addWidget(text_card, 3)
@@ -1287,6 +1305,10 @@ class ChatterboxApp(QMainWindow):
         player_title = QLabel("Player")
         player_title.setObjectName("CardTitle")
         player_header.addWidget(player_title)
+        player_header.addSpacing(12)
+        self.autoplay_checkbox = QCheckBox("Auto-play results")
+        self.autoplay_checkbox.setChecked(True)
+        player_header.addWidget(self.autoplay_checkbox)
         player_header.addStretch(1)
         self.current_file_label = QLabel("Currently playing: None")
         self.current_file_label.setObjectName("Muted")
@@ -1621,68 +1643,160 @@ class ChatterboxApp(QMainWindow):
 
     def handle_generate_stop_toggle(self):
         if not self.is_generating:
-            # --- Start Generation Part ---
-            # (Same as your last full working version, ensures button is enabled for stop)
-            if self.model is None:
-                QMessageBox.warning(self, "Model Not Loaded",
-                                    "Please load the model first.")
-                return
-            text = self.text_input.toPlainText().strip()
-            if not text:
-                QMessageBox.warning(self, "Input Error",
-                                    "Please enter some text to synthesize.")
-                return
+            self.start_generation(preview=False)
+            return
+        if hasattr(self, 'audio_generator_thread') and self.audio_generator_thread.isRunning():
+            print("UI: Requesting stop for audio_generator_thread")
+            self.audio_generator_thread.stop()
+            self.generate_button.setText("Stopping...")
+            self.generate_button.setEnabled(False)
+            self.set_status_message(
+                "Status: Stopping after the current section. Finished sections will be kept.")
+        else:
+            print("UI: Stop requested, but no active generation thread found. Resetting UI.")
+            self.on_generation_thread_finished()
 
-            self.is_generating = True
-            self.generate_button.setText("Stop Generation")
-            # Keep enabled to click "Stop"
-            self.generate_button.setEnabled(True)
-            self.load_model_button.setEnabled(False)
+    def preview_text(self):
+        selected = self.text_input.textCursor().selectedText().replace("\u2029", "\n").strip()
+        if selected:
+            return selected
+        sections = documents.split_into_sections(self.text_input.toPlainText())
+        return sections[0] if sections else ""
 
-            self.generation_start_time = QTime.currentTime()
-            self.generation_timer.start(1000)
-            self.update_generation_time_display()  # Initial status update
+    def start_generation(self, preview=False):
+        if self.is_generating:
+            return
+        if self.model is None:
+            QMessageBox.warning(self, "Model Not Loaded", "Please load the model first.")
+            return
+        text = self.preview_text() if preview else self.text_input.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Input Error", "Please enter some text to synthesize.")
+            return
 
-            # ... (rest of parameter fetching and thread creation/start same as your file)
-            ref_audio_full_path = self.ref_audio_path_label.toolTip()
-            exaggeration = self.exaggeration_slider.get_value()
-            cfg = self.cfg_slider.get_value()
-            temperature = self.temp_slider.get_value()
-            seed = self.seed_input.value()
+        self.is_generating = True
+        self.generation_is_preview = preview
+        self.generation_char_count = len(text)
+        self.generation_started_at = time.monotonic()
+        self.keep_take_button.setVisible(False)
+        self.generate_button.setText("Stop")
+        self.generate_button.setEnabled(True)
+        self.preview_button.setEnabled(False)
+        self.open_document_button.setEnabled(False)
+        self.load_model_button.setEnabled(False)
+        self.generation_progress.setValue(0)
+        self.generation_progress.setVisible(True)
+        self.text_stats_label.setText("Previewing..." if preview else "Starting...")
 
-            self.audio_generator_thread = AudioGeneratorThread(
-                self.model, text, 
-                ref_audio_full_path,
-                exaggeration, temperature, cfg, seed, self.output_directory,
-                language_id=self.language_combo.currentData() or "en",
-                repetition_penalty=self.repetition_penalty,
-                min_p=self.min_p,
-                top_p=self.top_p,
-                finishing=self.current_finishing_settings(),
-            )
-            self.audio_generator_thread.generation_complete.connect(
-                self.on_generation_complete)
-            self.audio_generator_thread.error_occurred.connect(
-                self.on_generation_error)
-            self.audio_generator_thread.chunk_generated.connect(
-                self.on_chunk_generated_progress)
-            self.audio_generator_thread.finished.connect(
-                self.on_generation_thread_finished)
-            self.audio_generator_thread.start()
+        self.generation_start_time = QTime.currentTime()
+        self.generation_timer.start(1000)
+        self.update_generation_time_display()
 
-        else:  # self.is_generating is True, so this is a Stop request
-            if hasattr(self, 'audio_generator_thread') and self.audio_generator_thread.isRunning():
-                print("UI: Requesting stop for audio_generator_thread")
-                self.audio_generator_thread.stop()  # Signal the thread
-                self.generate_button.setText("Stopping...")
-                # Disable button while waiting for thread to acknowledge stop
-                self.generate_button.setEnabled(False)
-                self.set_status_message(
-                    "Status: Stop requested. Waiting for current chunk to finish...")
-            else:  # Should not happen if is_generating is True
-                print(
-                    "UI: Stop requested, but no active generation thread found. Resetting UI.")
-                self.on_generation_thread_finished()  # Manually trigger UI reset
+        self.audio_generator_thread = AudioGeneratorThread(
+            self.model, text,
+            self.ref_audio_path_label.toolTip(),
+            self.exaggeration_slider.get_value(),
+            self.temp_slider.get_value(),
+            self.cfg_slider.get_value(),
+            self.seed_input.value(),
+            self.output_directory,
+            language_id=self.language_combo.currentData() or "en",
+            repetition_penalty=self.repetition_penalty,
+            min_p=self.min_p,
+            top_p=self.top_p,
+            finishing=self.current_finishing_settings(),
+            output_name=self.current_document_name,
+            preview=preview,
+        )
+        self.audio_generator_thread.generation_complete.connect(self.on_generation_complete)
+        self.audio_generator_thread.error_occurred.connect(self.on_generation_error)
+        self.audio_generator_thread.chunk_generated.connect(self.on_chunk_generated_progress)
+        self.audio_generator_thread.finished.connect(self.on_generation_thread_finished)
+        self.audio_generator_thread.start()
+
+    def keep_preview_take(self):
+        if self.last_preview_seed:
+            self.seed_input.setValue(self.last_preview_seed)
+            self.keep_take_button.setVisible(False)
+            self.text_stats_label.setText(
+                f"Take {self.last_preview_seed} locked; Generate Audio will match the preview.")
+
+    # --- Documents ---
+
+    def open_document(self):
+        start_dir = self.app_settings.get("last_document_dir") or os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Document", start_dir, documents.DOCUMENT_FILTER)
+        if not path:
+            return
+        try:
+            text = documents.load_document(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could Not Open Document",
+                                f"{os.path.basename(path)} could not be read:\n{exc}")
+            return
+        if not text:
+            QMessageBox.warning(self, "Empty Document",
+                                f"No readable text was found in {os.path.basename(path)}.")
+            return
+        self.app_settings["last_document_dir"] = os.path.dirname(path)
+        self.text_input.setPlainText(text)
+        self.current_document_name = documents.safe_file_stem(path)
+        self.current_document_label = os.path.basename(path)
+        self.update_text_stats()
+        self.set_status_message(f"Status: Loaded {os.path.basename(path)}. Try Preview before generating.")
+
+    def on_text_changed(self):
+        if not self.text_input.toPlainText().strip():
+            self.current_document_name = None
+        self.text_stats_timer.start()
+
+    def seconds_per_char(self):
+        measured = self.app_settings.get("seconds_per_char", {}).get(self.device_used)
+        return measured or DEFAULT_SECONDS_PER_CHAR.get(self.device_used, 0.35)
+
+    def update_text_stats(self):
+        if self.is_generating:
+            return
+        text = self.text_input.toPlainText().strip()
+        if not text:
+            self.text_stats_label.setText("Type or paste text, or open a document.")
+            return
+        sections = len(documents.split_into_sections(text))
+        estimate = self.format_duration(len(text) * self.seconds_per_char())
+        parts = []
+        if self.current_document_name:
+            parts.append(getattr(self, "current_document_label", self.current_document_name))
+        parts.append(f"{len(text):,} characters")
+        parts.append(f"{sections} section{'s' if sections != 1 else ''}")
+        parts.append(f"about {estimate} to generate")
+        self.text_stats_label.setText(" \u00b7 ".join(parts))
+
+    @staticmethod
+    def format_clock(seconds):
+        minutes, seconds = divmod(int(round(seconds)), 60)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+    @staticmethod
+    def format_duration(seconds):
+        seconds = int(round(seconds))
+        if seconds < 60:
+            return f"{max(seconds, 1)} s"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes} min {seconds:02d} s" if minutes < 10 else f"{minutes} min"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} h {minutes:02d} min"
+
+    def record_generation_speed(self):
+        if not self.generation_started_at or not self.generation_char_count:
+            return
+        elapsed = time.monotonic() - self.generation_started_at
+        measured = elapsed / self.generation_char_count
+        rates = self.app_settings.setdefault("seconds_per_char", {})
+        previous = rates.get(self.device_used)
+        rates[self.device_used] = round(measured if previous is None else 0.6 * previous + 0.4 * measured, 5)
 
     def _create_slider(self, min_val, max_val, step_val, default_val, value_format="{:.2f}"):
         return SliderWithValue(min_val, max_val, step_val, default_val, value_format)
@@ -2170,6 +2284,7 @@ class ChatterboxApp(QMainWindow):
         if not preset_text:
             preset_text = selected_entry.get("test_text")
         if preset_text:
+            self.current_document_name = None
             self.text_input.setPlainText(preset_text)
 
     def open_models_config(self):
@@ -2262,6 +2377,7 @@ class ChatterboxApp(QMainWindow):
             "If this is the first run or a new repo, model files may still be downloading in the console."
         )
         self.generate_button.setEnabled(False)
+        self.preview_button.setEnabled(False)
         self.set_model_loading_state(True)
         self.model_loader_thread = ModelLoaderThread(
             selected_repo,
@@ -2285,7 +2401,9 @@ class ChatterboxApp(QMainWindow):
             status_message += " NVIDIA GPU detected, but PyTorch CUDA is unavailable."
         self.set_status_message(status_message)
         self.generate_button.setEnabled(True)
+        self.preview_button.setEnabled(True)
         self.set_model_loading_state(False)
+        self.update_text_stats()
         self.on_experimental_models_toggled(
             self.experimental_models_checkbox.isChecked())
         if self.system_has_nvidia_gpu and self.device_used == "cpu":
@@ -2305,6 +2423,7 @@ class ChatterboxApp(QMainWindow):
         self.model = None
         self.set_status_message(f"Status: Model load failed. {error_msg}")
         self.generate_button.setEnabled(False)
+        self.preview_button.setEnabled(False)
         self.set_model_loading_state(False)
         self.on_experimental_models_toggled(
             self.experimental_models_checkbox.isChecked())
@@ -2319,10 +2438,20 @@ class ChatterboxApp(QMainWindow):
             self.generation_timer.stop()
 
         # Reset UI elements
+        thread = getattr(self, "audio_generator_thread", None)
+        completed_fully = (thread is not None and not thread.preview
+                           and thread.partial_info is None and not thread._is_stopped)
+        if completed_fully and self.generation_progress.value() == self.generation_progress.maximum():
+            self.record_generation_speed()
         self.is_generating = False
         self.generate_button.setText("Generate Audio")
         self.generate_button.setEnabled(True)
+        self.preview_button.setEnabled(True)
+        self.open_document_button.setEnabled(True)
         self.load_model_button.setEnabled(True)
+        self.generation_progress.setVisible(False)
+        if not self.keep_take_button.isVisible():
+            self.update_text_stats()
 
         # Final status update based on how the thread might have ended,
         # if not already set by on_generation_complete or on_generation_error.
@@ -2331,9 +2460,9 @@ class ChatterboxApp(QMainWindow):
         if "stopping generation..." in current_status.lower() or \
            "stop requested." in current_status.lower():
             self.set_status_message("Status: Generation stopped by user.")
-        elif not ("full audio generated" in current_status.lower() or
-                  "failed" in current_status.lower() or
-                  "stopped by user" in current_status.lower()):
+        elif not any(marker in current_status.lower() for marker in (
+                "full audio generated", "failed", "stopped by user",
+                "preview ready", "stopped. saved")):
             # If no specific completion or error message was set, default to Ready
             self.set_status_message("Status: Ready.")
 
@@ -2363,17 +2492,20 @@ class ChatterboxApp(QMainWindow):
                 f"Status: Generating audio... {minutes:02}:{seconds:02}")
 
     def on_chunk_generated_progress(self, current_chunk, total_chunks):
-        # This will be the primary status updater during active generation
         if not self.is_generating:
-            return  # Don't update if we're trying to stop
-
-        elapsed_str = ""
-        if self.generation_start_time:
-            elapsed_ms = self.generation_start_time.msecsTo(
-                QTime.currentTime())
-            elapsed_str = f" (Elapsed: {self.format_time(elapsed_ms)})"
-        self.set_status_message(
-            f"Status: Generating chunk {current_chunk}/{total_chunks}{elapsed_str}...")
+            return
+        done = current_chunk - 1
+        elapsed = time.monotonic() - self.generation_started_at
+        self.generation_progress.setMaximum(total_chunks)
+        self.generation_progress.setValue(done)
+        label = "Preview" if self.generation_is_preview else "Section"
+        parts = [f"{label} {current_chunk} of {total_chunks}",
+                 f"{self.format_clock(elapsed)} elapsed"]
+        if done:
+            remaining = elapsed / done * (total_chunks - done)
+            parts.append(f"{self.format_clock(remaining)} left")
+        self.text_stats_label.setText(" \u00b7 ".join(parts))
+        self.set_status_message(f"Status: Generating section {current_chunk}/{total_chunks}...")
 
     def on_generation_complete(self, output_path, sample_rate):
         # self.is_generating will be set to False by on_generation_thread_finished
@@ -2385,8 +2517,23 @@ class ChatterboxApp(QMainWindow):
                 QTime.currentTime())
             total_generation_time_str = f" (Total time: {self.format_time(elapsed_ms)})"
 
-        self.set_status_message(
-            f"Status: Full audio generated: {os.path.basename(output_path)}{total_generation_time_str}")
+        thread = self.audio_generator_thread
+        self.generation_progress.setValue(self.generation_progress.maximum())
+        if thread.preview:
+            self.last_preview_seed = thread.actual_seed_used
+            if self.seed_input.value() == 0:
+                self.text_stats_label.setText(f"Preview ready (take {self.last_preview_seed}).")
+                self.keep_take_button.setVisible(True)
+            else:
+                self.text_stats_label.setText(f"Preview ready (take {self.last_preview_seed}).")
+            self.set_status_message(f"Status: Preview ready{total_generation_time_str}.")
+        elif thread.partial_info:
+            done, total = thread.partial_info
+            self.set_status_message(
+                f"Status: Stopped. Saved {done} of {total} sections: {os.path.basename(output_path)}")
+        else:
+            self.set_status_message(
+                f"Status: Full audio generated: {os.path.basename(output_path)}{total_generation_time_str}")
 
         self.current_audio_file = output_path
         # ... (rest of the method same as your working version)
@@ -2397,7 +2544,7 @@ class ChatterboxApp(QMainWindow):
         self.stop_button.setEnabled(True)
         self.playhead_slider.setEnabled(True)
         self.update_output_log()
-        if self.autoplay_checkbox.isChecked():
+        if self.autoplay_checkbox.isChecked() or thread.preview:
             self.media_player.play()
 
     def on_generation_error(self, error_msg):
