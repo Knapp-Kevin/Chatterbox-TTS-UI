@@ -67,6 +67,8 @@ Windows remains the primary maintained path.
 <summary>Click to expand</summary>
 
 *   **Simple PySide6 Interface:**
+    *   Sidebar layout with **Generate**, **Voice**, **Model** and **Log** pages, and a light/dark theme (amber accent) that follows the Windows app mode.
+    *   Plain-language delivery controls: Expressiveness (exaggeration), Pacing (CFG weight), Variation (temperature) and Take number (seed); hover any control for details.
     *   Text input for speech synthesis.
     *   Load reference audio files (`.wav`, `.mp3`, `.flac`) for voice cloning.
     *   Record a reference clip from a microphone directly in the app.

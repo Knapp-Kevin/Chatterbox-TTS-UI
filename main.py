@@ -126,7 +126,8 @@ from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QLabel, QTextEdit, QPushButton, QSlider, QSpinBox,
     QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QGroupBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QPlainTextEdit, QSplitter, QLineEdit,
-    QCheckBox, QComboBox, QProgressBar, QSizePolicy
+    QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget,
+    QScrollArea
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
@@ -134,6 +135,7 @@ from PySide6.QtMultimedia import (
     QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
 )
 from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette
+import ui_theme
 from collections import deque
 import time
 import wave
@@ -957,7 +959,7 @@ class ChatterboxApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Chatterbox TTS Interface")
-        self.setGeometry(100, 100, 800, 720)
+        self.setGeometry(100, 100, 1000, 820)
         self.model = None
         self.device_used = "cpu"
         self.current_model_repo = DEFAULT_MODEL_REPO
@@ -982,6 +984,12 @@ class ChatterboxApp(QMainWindow):
         self.media_devices = QMediaDevices(self)
         self.recording_format = None
         self.recording_buffer = bytearray()
+
+        self.preview_player = QMediaPlayer(self)
+        self.preview_audio_output = QAudioOutput(self)
+        self.preview_player.setAudioOutput(self.preview_audio_output)
+        self.preview_button_playing = None
+        self.preview_player.playbackStateChanged.connect(self._on_preview_state_changed)
 
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -1024,224 +1032,367 @@ class ChatterboxApp(QMainWindow):
             self.generate_button.setEnabled(False)
             self.load_model_button.setEnabled(False)
 
+    PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_LOG = range(4)
+
+    def _make_card(self, title=None):
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10)
+        if title:
+            title_label = QLabel(title)
+            title_label.setObjectName("CardTitle")
+            layout.addWidget(title_label)
+        return card, layout
+
+    def _make_page(self, title, subtitle):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        title_label = QLabel(title)
+        title_label.setObjectName("PageTitle")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("PageSubtitle")
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
+        return page, layout
+
+    @staticmethod
+    def _scrollable(page):
+        # Pages scroll rather than clip when the window is short.
+        scroll = QScrollArea()
+        scroll.setWidget(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        return scroll
+
+    @staticmethod
+    def _accent(button):
+        button.setProperty("accent", True)
+        return button
+
+    @staticmethod
+    def _link(button):
+        button.setFlat(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
+
     def _init_ui(self):
+        self.setMinimumSize(940, 660)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
+        root_layout = QHBoxLayout(main_widget)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        inputs_group = QGroupBox("Inputs")
-        inputs_layout = QVBoxLayout()
+        sidebar_panel = QWidget()
+        sidebar_panel.setObjectName("SidebarPanel")
+        sidebar_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        sidebar_layout = QVBoxLayout(sidebar_panel)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        self.sidebar = QListWidget()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(180)
+        self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for label in ("Generate", "Voice", "Model", "Log"):
+            self.sidebar.addItem(QListWidgetItem(label))
+        app_title = QLabel("Chatterbox")
+        app_title.setObjectName("AppTitle")
+        app_title.setAutoFillBackground(False)
+        sidebar_layout.addSpacing(14)
+        sidebar_layout.addWidget(app_title)
+        sidebar_layout.addWidget(self.sidebar)
+        self.pages = QStackedWidget()
+        self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
+        root_layout.addWidget(sidebar_panel)
+        root_layout.addWidget(self.pages, 1)
 
+        # ---------- Generate page ----------
+        generate_page, generate_layout = self._make_page(
+            "Generate", "Write the text, pick a language and delivery, then generate.")
+
+        voice_row = QHBoxLayout()
+        voice_row.addWidget(QLabel("Voice"))
+        self.voice_chip = QLabel("Default voice")
+        self.voice_chip.setObjectName("VoiceChip")
+        self.voice_chip.setTextFormat(Qt.TextFormat.PlainText)
+        voice_row.addWidget(self.voice_chip)
+        change_voice_button = self._link(QPushButton("Change..."))
+        change_voice_button.clicked.connect(
+            lambda: self.sidebar.setCurrentRow(self.PAGE_VOICE))
+        voice_row.addWidget(change_voice_button)
+        voice_row.addStretch(1)
+        voice_row.addWidget(QLabel("Language"))
+        self.language_combo = QComboBox()
+        self.language_combo.setMinimumWidth(200)
+        voice_row.addWidget(self.language_combo)
+        generate_layout.addLayout(voice_row)
+
+        text_card, text_card_layout = self._make_card("Text")
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText(
-            "Enter text to synthesize. "
-            "Optionally load a reference clip using the browse button. "
-            f"Segments are ~{MAX_TEXT_INPUT_LENGTH} chars."
+            "Enter text to synthesize. Long text is split into segments of "
+            f"~{MAX_TEXT_INPUT_LENGTH} characters and stitched together."
         )
-        self.text_input.setMaximumHeight(200)
-        self.text_input.setFixedHeight(88)
-        text_label = QLabel("Text")
-        inputs_layout.addWidget(text_label)
-        inputs_layout.addWidget(self.text_input)
-
-        ref_audio_layout = QHBoxLayout()
-        self.ref_audio_path_label = QLabel("None selected.")
-        self.ref_audio_path_label.setWordWrap(False)
-        self.ref_audio_path_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.ref_audio_path_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        browse_ref_button = QPushButton("Browse Reference Audio...")
-        browse_ref_button.clicked.connect(self.browse_reference_audio)
-        self.mic_combo = QComboBox()
-        self.mic_combo.setMaximumWidth(220)
-        self.mic_combo.setToolTip("Microphone used for recording a reference clip.")
-        self.record_button = QPushButton("Record...")
-        self.record_button.setToolTip(
-            "Record a reference clip from the selected microphone "
-            f"({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s; "
-            "about 10-15 s of clean speech works best).")
-        self.record_button.clicked.connect(self.open_recording_dialog)
-        self.media_devices.audioInputsChanged.connect(self.populate_microphones)
-        self.populate_microphones()
-        ref_audio_layout.addWidget(self.ref_audio_path_label, 1)
-        ref_audio_layout.addWidget(self.mic_combo)
-        ref_audio_layout.addWidget(self.record_button)
-        ref_audio_layout.addWidget(browse_ref_button)
-        top_controls_layout = QGridLayout()
-        top_controls_layout.setColumnStretch(1, 1)
-        top_controls_layout.setColumnStretch(3, 1)
-        top_controls_layout.addWidget(QLabel("Reference Audio"), 0, 0)
-        top_controls_layout.addLayout(ref_audio_layout, 0, 1, 1, 3)
-
-        repo_layout = QHBoxLayout()
-        self.model_repo_combo = QComboBox()
-        self.model_repo_combo.currentTextChanged.connect(
-            self.on_model_repo_changed)
-        repo_layout.addWidget(self.model_repo_combo, 1)
-        top_controls_layout.addWidget(QLabel("Model Repo"), 1, 0)
-        top_controls_layout.addLayout(repo_layout, 1, 1)
-
-        self.load_model_button = QPushButton("Load Selected Model")
-        self.load_model_button.clicked.connect(self.load_model)
-        top_controls_layout.addWidget(self.load_model_button, 1, 2)
-
-        self.language_combo = QComboBox()
-        top_controls_layout.addWidget(QLabel("Language"), 2, 0)
-        top_controls_layout.addWidget(self.language_combo, 2, 1)
-
-        self.experimental_models_checkbox = QCheckBox(
-            "Experimental user models")
-        self.experimental_models_checkbox.toggled.connect(
-            self.on_experimental_models_toggled)
-        top_controls_layout.addWidget(self.experimental_models_checkbox, 2, 2, 1, 2)
-
-        model_config_actions_layout = QHBoxLayout()
-        self.open_models_config_button = QPushButton("Open models.json")
-        self.open_models_config_button.clicked.connect(self.open_models_config)
-        model_config_actions_layout.addWidget(self.open_models_config_button)
-        self.reload_models_button = QPushButton("Reload Model List")
-        self.reload_models_button.clicked.connect(self.reload_models_config)
-        model_config_actions_layout.addWidget(self.reload_models_button)
-        self.model_details_button = QPushButton("Model Details")
-        self.model_details_button.clicked.connect(self.show_model_details_dialog)
-        model_config_actions_layout.addWidget(self.model_details_button)
-        self.model_help_button = QPushButton("Custom Models Help")
-        self.model_help_button.clicked.connect(self.show_model_help_dialog)
-        model_config_actions_layout.addWidget(self.model_help_button)
-        self.hf_token_button = QPushButton("HF Token...")
-        self.hf_token_button.clicked.connect(self.open_hf_token_dialog)
-        model_config_actions_layout.addWidget(self.hf_token_button)
-        self.sampling_settings_button = QPushButton("Sampling...")
-        self.sampling_settings_button.clicked.connect(self.open_sampling_settings_dialog)
-        model_config_actions_layout.addWidget(self.sampling_settings_button)
-        model_config_actions_layout.addStretch()
-        top_controls_layout.addWidget(QLabel("Config"), 3, 0)
-        top_controls_layout.addLayout(model_config_actions_layout, 3, 1, 1, 3)
-        inputs_layout.addLayout(top_controls_layout)
-
-        self.model_config_help_label = QLabel(
-            "Edit repo_id, enabled, backend, and language_id in models.json. "
-            "Set enabled=true to make an entry appear in the picker, then use Reload Model List."
-        )
-        self.model_config_help_label.setWordWrap(True)
-        self.model_config_help_label.setTextFormat(Qt.TextFormat.PlainText)
-
-        self.model_details_label = QLabel("")
-        self.model_details_label.setWordWrap(True)
-        self.model_details_label.setTextFormat(Qt.TextFormat.PlainText)
-
-        params_layout = QGridLayout()
-        params_layout.setColumnStretch(1, 1)
-        params_layout.setColumnStretch(3, 1)
-        self.exaggeration_slider = self._create_slider(0.25, 2.0, 0.05, 0.5)
-        params_layout.addWidget(QLabel("Exaggeration"), 0, 0)
-        params_layout.addWidget(self.exaggeration_slider, 0, 1)
-
-        self.cfg_slider = self._create_slider(0.2, 1.0, 0.05, 0.5)
-        params_layout.addWidget(QLabel("CFG/Pace"), 0, 2)
-        params_layout.addWidget(self.cfg_slider, 0, 3)
-
-        self.temp_slider = self._create_slider(0.05, 5.0, 0.05, 0.8)
-        params_layout.addWidget(QLabel("Temperature"), 1, 0)
-        params_layout.addWidget(self.temp_slider, 1, 1)
-
-        self.seed_input = QSpinBox()
-        self.seed_input.setRange(0, 1_000_000_000)
-        self.seed_input.setValue(0)
-        params_layout.addWidget(QLabel("Seed (0 = random)"), 1, 2)
-        params_layout.addWidget(self.seed_input, 1, 3)
-
-        inputs_layout.addLayout(params_layout)
+        self.text_input.setMinimumHeight(90)
+        # Fill the leftover height instead of forcing the page to scroll.
+        self.text_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        text_card_layout.addWidget(self.text_input, 1)
 
         generate_actions_layout = QHBoxLayout()
         self.autoplay_checkbox = QCheckBox("Auto-play generated audio")
         self.autoplay_checkbox.setChecked(True)
         generate_actions_layout.addWidget(self.autoplay_checkbox)
         generate_actions_layout.addStretch()
-
         self.use_preset_button = QPushButton("Use Test Preset")
         self.use_preset_button.clicked.connect(self.apply_selected_text_preset)
         generate_actions_layout.addWidget(self.use_preset_button)
-
-        self.generate_button = QPushButton("Generate Audio")
+        self.generate_button = self._accent(QPushButton("Generate Audio"))
         self.generate_button.clicked.connect(self.handle_generate_stop_toggle)
         self.generate_button.setEnabled(False)
         self.generate_button.setMinimumWidth(180)
         generate_actions_layout.addWidget(self.generate_button)
-        inputs_layout.addLayout(generate_actions_layout)
+        text_card_layout.addLayout(generate_actions_layout)
+        generate_layout.addWidget(text_card, 3)
 
-        inputs_group.setLayout(inputs_layout)
-        main_layout.addWidget(inputs_group)
+        delivery_card, delivery_layout = self._make_card("Delivery")
+        params_layout = QGridLayout()
+        params_layout.setHorizontalSpacing(14)
+        params_layout.setVerticalSpacing(8)
+        params_layout.setColumnStretch(1, 1)
+        params_layout.setColumnStretch(3, 1)
 
-        playback_group = QGroupBox("Playback & Output")
-        playback_v_layout = QVBoxLayout()
+        def add_control(row, column, title, widget, tooltip):
+            label = QLabel(title)
+            label.setToolTip(tooltip)
+            widget.setToolTip(tooltip)
+            params_layout.addWidget(label, row, column)
+            params_layout.addWidget(widget, row, column + 1)
+
+        self.exaggeration_slider = self._create_slider(0.25, 2.0, 0.05, 0.5)
+        add_control(0, 0, "Expressiveness", self.exaggeration_slider,
+                    "How animated and emotional the delivery sounds. 0.5 is neutral; "
+                    "higher is more dramatic (and often a bit faster). [exaggeration]")
+        self.cfg_slider = self._create_slider(0.2, 1.0, 0.05, 0.5)
+        add_control(0, 2, "Pacing", self.cfg_slider,
+                    "Lower gives slower, more deliberate speech; higher is brisker and "
+                    "follows the reference voice's style more closely. Try 0.3 for "
+                    "expressive or fast-talking voices. [cfg_weight]")
+        self.temp_slider = self._create_slider(0.05, 5.0, 0.05, 0.8)
+        add_control(1, 0, "Variation", self.temp_slider,
+                    "How different each take sounds. Higher is livelier but can become "
+                    "unstable; lower is steadier and more predictable. [temperature]")
+        self.seed_input = QSpinBox()
+        self.seed_input.setRange(0, 1_000_000_000)
+        self.seed_input.setValue(0)
+        self.seed_input.setSpecialValueText("New take each time")
+        self.seed_input.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        add_control(1, 2, "Take number", self.seed_input,
+                    "Leave on 'New take each time' for a fresh result on every run. Enter a "
+                    "number to reproduce the same take exactly; the number used is shown in "
+                    "the file name. [seed]")
+        delivery_layout.addLayout(params_layout)
+        delivery_hint = QLabel(
+            "Tip: punctuation steers delivery too. Commas and ellipses add pauses; "
+            "question marks lift the ending. Advanced options are under Model > Sampling.")
+        delivery_hint.setObjectName("Muted")
+        delivery_hint.setWordWrap(True)
+        delivery_layout.addWidget(delivery_hint)
+        generate_layout.addWidget(delivery_card)
+
+        player_card, player_layout = self._make_card()
+        player_header = QHBoxLayout()
+        player_title = QLabel("Player")
+        player_title.setObjectName("CardTitle")
+        player_header.addWidget(player_title)
+        player_header.addStretch(1)
         self.current_file_label = QLabel("Currently playing: None")
-        playback_v_layout.addWidget(self.current_file_label)
-
+        self.current_file_label.setObjectName("Muted")
+        player_header.addWidget(self.current_file_label)
+        player_layout.addLayout(player_header)
         player_controls_layout = QHBoxLayout()
         self.play_pause_button = QPushButton("Play")
-        self.play_pause_button.clicked.connect(
-            self.toggle_play_pause)  # Connection is correct
+        self.play_pause_button.clicked.connect(self.toggle_play_pause)
         self.play_pause_button.setEnabled(False)
+        self.play_pause_button.setMinimumWidth(80)
         player_controls_layout.addWidget(self.play_pause_button)
-
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop_audio)
         self.stop_button.setEnabled(False)
+        self.stop_button.setMinimumWidth(80)
         player_controls_layout.addWidget(self.stop_button)
-        playback_v_layout.addLayout(player_controls_layout)
-
-        playhead_layout = QHBoxLayout()
         self.current_time_label = QLabel("00:00")
         self.playhead_slider = QSlider(Qt.Orientation.Horizontal)
-
         self.playhead_slider.sliderPressed.connect(self.slider_pressed)
         self.playhead_slider.sliderMoved.connect(self.seek_audio_on_move)
         self.playhead_slider.sliderReleased.connect(self.slider_released)
-
         self.playhead_slider.setEnabled(False)
         self.duration_label = QLabel("00:00")
-        playhead_layout.addWidget(self.current_time_label)
-        playhead_layout.addWidget(self.playhead_slider)
-        playhead_layout.addWidget(self.duration_label)
-        playback_v_layout.addLayout(playhead_layout)
-
-        playback_splitter = QSplitter(Qt.Orientation.Horizontal)
+        player_controls_layout.addSpacing(8)
+        player_controls_layout.addWidget(self.current_time_label)
+        player_controls_layout.addWidget(self.playhead_slider, 1)
+        player_controls_layout.addWidget(self.duration_label)
+        player_layout.addLayout(player_controls_layout)
+        history_label = QLabel("Generated files (double-click to play)")
+        history_label.setObjectName("Muted")
+        player_layout.addWidget(history_label)
         self.output_log_listwidget = QListWidget()
         self.output_log_listwidget.itemDoubleClicked.connect(
             self.play_selected_from_log)
-        history_row_height = self.output_log_listwidget.sizeHintForRow(0)
-        if history_row_height <= 0:
-            history_row_height = self.output_log_listwidget.fontMetrics().height() + 8
-        panel_list_height = (history_row_height * 6) + 8
-        self.output_log_listwidget.setMaximumHeight(panel_list_height)
-        history_panel = QWidget()
-        history_layout = QVBoxLayout(history_panel)
-        history_layout.setContentsMargins(0, 0, 0, 0)
-        history_layout.addWidget(
-            QLabel("Generated Files History (double-click to play):")
-        )
-        history_layout.addWidget(self.output_log_listwidget)
-        playback_splitter.addWidget(history_panel)
+        self.output_log_listwidget.setMinimumHeight(70)
+        self.output_log_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        player_layout.addWidget(self.output_log_listwidget, 1)
+        generate_layout.addWidget(player_card, 2)
+        self.pages.addWidget(self._scrollable(generate_page))
 
+        # ---------- Voice page ----------
+        voice_page, voice_layout = self._make_page(
+            "Voice", "Choose the voice to clone. Leave it on the default voice, "
+            "record yourself, or use an existing audio file.")
+
+        current_card, current_layout = self._make_card("Current voice")
+        current_row = QHBoxLayout()
+        self.ref_audio_path_label = QLabel("None selected.")
+        self.ref_audio_path_label.setWordWrap(False)
+        self.ref_audio_path_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.ref_audio_path_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        current_row.addWidget(self.ref_audio_path_label, 1)
+        self.preview_reference_button = QPushButton("Preview")
+        self.preview_reference_button.clicked.connect(self.toggle_reference_preview)
+        current_row.addWidget(self.preview_reference_button)
+        self.clear_reference_button = QPushButton("Use default voice")
+        self.clear_reference_button.clicked.connect(self.clear_reference_audio)
+        current_row.addWidget(self.clear_reference_button)
+        current_layout.addLayout(current_row)
+        voice_layout.addWidget(current_card)
+
+        record_card, record_layout = self._make_card("Record a new reference")
+        record_hint = QLabel(
+            "Read a short passage (about 15 seconds) in a quiet room. "
+            "The first 6-10 seconds matter most, so start speaking right away.")
+        record_hint.setObjectName("Muted")
+        record_hint.setWordWrap(True)
+        record_layout.addWidget(record_hint)
+        record_row = QHBoxLayout()
+        record_row.addWidget(QLabel("Microphone"))
+        self.mic_combo = QComboBox()
+        self.mic_combo.setToolTip("Microphone used for recording a reference clip.")
+        self.mic_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        record_row.addWidget(self.mic_combo, 1)
+        self.record_button = self._accent(QPushButton("Record..."))
+        self.record_button.setToolTip(
+            "Record a reference clip from the selected microphone "
+            f"({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s).")
+        self.record_button.clicked.connect(self.open_recording_dialog)
+        record_row.addWidget(self.record_button)
+        record_layout.addLayout(record_row)
+        self.media_devices.audioInputsChanged.connect(self.populate_microphones)
+        self.populate_microphones()
+        voice_layout.addWidget(record_card)
+
+        saved_card, saved_layout = self._make_card("Saved recordings and files")
+        self.recordings_listwidget = QListWidget()
+        self.recordings_listwidget.setToolTip("Double-click a recording to use it.")
+        self.recordings_listwidget.itemDoubleClicked.connect(
+            lambda _item: self.use_selected_recording())
+        self.recordings_listwidget.currentRowChanged.connect(
+            lambda _row: self.update_recording_buttons())
+        self.recordings_listwidget.setMinimumHeight(90)
+        self.recordings_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        saved_layout.addWidget(self.recordings_listwidget, 1)
+        saved_actions = QHBoxLayout()
+        self.use_recording_button = QPushButton("Use selected")
+        self.use_recording_button.clicked.connect(self.use_selected_recording)
+        saved_actions.addWidget(self.use_recording_button)
+        self.preview_recording_button = QPushButton("Preview selected")
+        self.preview_recording_button.clicked.connect(self.preview_selected_recording)
+        saved_actions.addWidget(self.preview_recording_button)
+        saved_actions.addStretch(1)
+        open_recordings_button = QPushButton("Open folder")
+        open_recordings_button.clicked.connect(self.open_recordings_folder)
+        saved_actions.addWidget(open_recordings_button)
+        browse_ref_button = QPushButton("Browse for a file...")
+        browse_ref_button.clicked.connect(self.browse_reference_audio)
+        saved_actions.addWidget(browse_ref_button)
+        saved_layout.addLayout(saved_actions)
+        voice_layout.addWidget(saved_card, 1)
+        self.pages.addWidget(self._scrollable(voice_page))
+
+        # ---------- Model page ----------
+        model_page, model_layout = self._make_page(
+            "Model", "Choose which Chatterbox model to run. Models download once, "
+            "then load from the local cache.")
+        model_card, model_card_layout = self._make_card("Active model")
+        repo_layout = QHBoxLayout()
+        self.model_repo_combo = QComboBox()
+        self.model_repo_combo.currentTextChanged.connect(self.on_model_repo_changed)
+        repo_layout.addWidget(self.model_repo_combo, 1)
+        self.load_model_button = self._accent(QPushButton("Load Selected Model"))
+        self.load_model_button.clicked.connect(self.load_model)
+        repo_layout.addWidget(self.load_model_button)
+        model_card_layout.addLayout(repo_layout)
+        self.experimental_models_checkbox = QCheckBox("Show experimental user models")
+        self.experimental_models_checkbox.toggled.connect(
+            self.on_experimental_models_toggled)
+        model_card_layout.addWidget(self.experimental_models_checkbox)
+        model_layout.addWidget(model_card)
+
+        config_card, config_layout = self._make_card("Configuration")
+        self.model_config_help_label = QLabel(
+            "Edit repo_id, enabled, backend, and language_id in models.json. "
+            "Set enabled=true to make an entry appear in the picker, then use Reload Model List."
+        )
+        self.model_config_help_label.setWordWrap(True)
+        self.model_config_help_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.model_config_help_label.setObjectName("Muted")
+        config_layout.addWidget(self.model_config_help_label)
+        self.model_details_label = QLabel("")
+        self.model_details_label.setWordWrap(True)
+        self.model_details_label.setTextFormat(Qt.TextFormat.PlainText)
+        config_grid = QGridLayout()
+        self.open_models_config_button = QPushButton("Open models.json")
+        self.open_models_config_button.clicked.connect(self.open_models_config)
+        self.reload_models_button = QPushButton("Reload Model List")
+        self.reload_models_button.clicked.connect(self.reload_models_config)
+        self.model_details_button = QPushButton("Model Details")
+        self.model_details_button.clicked.connect(self.show_model_details_dialog)
+        self.model_help_button = QPushButton("Custom Models Help")
+        self.model_help_button.clicked.connect(self.show_model_help_dialog)
+        self.hf_token_button = QPushButton("HF Token...")
+        self.hf_token_button.clicked.connect(self.open_hf_token_dialog)
+        self.sampling_settings_button = QPushButton("Sampling...")
+        self.sampling_settings_button.clicked.connect(self.open_sampling_settings_dialog)
+        for index, button in enumerate((
+                self.open_models_config_button, self.reload_models_button,
+                self.model_details_button, self.model_help_button,
+                self.hf_token_button, self.sampling_settings_button)):
+            config_grid.addWidget(button, index // 3, index % 3)
+        config_layout.addLayout(config_grid)
+        model_layout.addWidget(config_card)
+        model_layout.addStretch(1)
+        self.pages.addWidget(self._scrollable(model_page))
+
+        # ---------- Log page ----------
+        log_page, log_layout = self._make_page(
+            "Log", "Technical output from model loading and generation.")
         self.console_log_view = QPlainTextEdit()
         self.console_log_view.setReadOnly(True)
         self.console_log_view.setMaximumBlockCount(1000)
         self.console_log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.console_log_view.setMaximumHeight(panel_list_height)
-        console_panel = QWidget()
-        console_layout = QVBoxLayout(console_panel)
-        console_layout.setContentsMargins(0, 0, 0, 0)
-        console_layout.addWidget(QLabel("Activity Log:"))
-        console_layout.addWidget(self.console_log_view)
-        playback_splitter.addWidget(console_panel)
-        playback_splitter.setSizes([320, 520])
-        playback_v_layout.addWidget(playback_splitter)
+        log_font = QFont("Consolas")
+        log_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.console_log_view.setFont(log_font)
+        log_layout.addWidget(self.console_log_view, 1)
+        self.pages.addWidget(self._scrollable(log_page))
 
-        playback_group.setLayout(playback_v_layout)
-        main_layout.addWidget(playback_group)
+        self.sidebar.setCurrentRow(self.PAGE_GENERATE)
 
         qt_status_bar = self.statusBar()
         qt_status_bar.setSizeGripEnabled(False)
@@ -1258,7 +1409,7 @@ class ChatterboxApp(QMainWindow):
         self.model_load_progress.setRange(0, 1)
         self.model_load_progress.setValue(0)
         self.model_load_progress.setTextVisible(False)
-        self.model_load_progress.setFixedHeight(10)
+        self.model_load_progress.setFixedHeight(8)
         self.model_load_progress.setFixedWidth(120)
         self.model_load_progress.setEnabled(False)
         qt_status_bar.addPermanentWidget(self.model_load_progress)
@@ -1266,6 +1417,8 @@ class ChatterboxApp(QMainWindow):
         self.on_experimental_models_toggled(False)
         self.refresh_language_options()
         self.refresh_hf_token_button_tooltip()
+        self.refresh_recordings_list()
+        self.set_reference_audio(None)
 
     def attach_log_sink(self):
         global APP_LOG_SINK
@@ -1429,12 +1582,105 @@ class ChatterboxApp(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Reference Audio", default_dir, "Audio Files (*.wav *.mp3 *.flac)")
         if file_path:
-            self.ref_audio_path_label.setText(os.path.basename(file_path))
-            self.ref_audio_path_label.setToolTip(file_path)
+            self.set_reference_audio(file_path)
             self.last_reference_audio_dir = os.path.dirname(file_path)
+
+    # --- Voice selection ---
+
+    def set_reference_audio(self, path):
+        if path:
+            name = os.path.basename(path)
+            self.ref_audio_path_label.setText(name)
+            self.ref_audio_path_label.setToolTip(path)
+            self.voice_chip.setText(name)
+            self.voice_chip.setToolTip(path)
         else:
-            self.ref_audio_path_label.setText("None selected.")
+            self.ref_audio_path_label.setText("Default voice (no reference clip)")
             self.ref_audio_path_label.setToolTip("")
+            self.voice_chip.setText("Default voice")
+            self.voice_chip.setToolTip("The model's built-in voice. Pick a reference clip on the Voice page to clone a voice.")
+        self.preview_reference_button.setEnabled(bool(path))
+        self.clear_reference_button.setEnabled(bool(path))
+
+    def clear_reference_audio(self):
+        self.stop_reference_preview()
+        self.set_reference_audio(None)
+        self.set_status_message("Status: Using the default voice.")
+
+    def refresh_recordings_list(self):
+        self.recordings_listwidget.clear()
+        paths = []
+        if os.path.isdir(self.recordings_directory):
+            paths = [os.path.join(self.recordings_directory, name)
+                     for name in os.listdir(self.recordings_directory)
+                     if name.lower().endswith(".wav")]
+        for path in sorted(paths, key=os.path.getmtime, reverse=True):
+            try:
+                with wave.open(path, "rb") as wav_file:
+                    seconds = wav_file.getnframes() / float(wav_file.getframerate())
+                length = f"{seconds:.0f} s"
+            except Exception:
+                length = "unreadable"
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%b %d, %I:%M %p")
+            item = QListWidgetItem(f"{os.path.basename(path)}    {length}  ·  {when}")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            self.recordings_listwidget.addItem(item)
+        if not paths:
+            placeholder = QListWidgetItem("No recordings yet. Use Record... above to make one.")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.recordings_listwidget.addItem(placeholder)
+        self.update_recording_buttons()
+
+    def selected_recording_path(self):
+        item = self.recordings_listwidget.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def update_recording_buttons(self):
+        has_selection = bool(self.selected_recording_path())
+        self.use_recording_button.setEnabled(has_selection)
+        self.preview_recording_button.setEnabled(has_selection)
+
+    def use_selected_recording(self):
+        path = self.selected_recording_path()
+        if path:
+            self.set_reference_audio(path)
+            self.set_status_message(f"Status: Voice set to {os.path.basename(path)}.")
+
+    def _start_reference_preview(self, path, button):
+        self.stop_reference_preview()
+        self.preview_button_playing = button
+        self.preview_player.setSource(QUrl.fromLocalFile(path))
+        self.preview_player.play()
+        button.setText("Stop preview")
+
+    def stop_reference_preview(self):
+        self.preview_player.stop()
+
+    def _on_preview_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.StoppedState and self.preview_button_playing:
+            self.preview_reference_button.setText("Preview")
+            self.preview_recording_button.setText("Preview selected")
+            self.preview_button_playing = None
+
+    def toggle_reference_preview(self):
+        if self.preview_button_playing is self.preview_reference_button:
+            self.stop_reference_preview()
+            return
+        path = self.ref_audio_path_label.toolTip()
+        if path:
+            self._start_reference_preview(path, self.preview_reference_button)
+
+    def preview_selected_recording(self):
+        if self.preview_button_playing is self.preview_recording_button:
+            self.stop_reference_preview()
+            return
+        path = self.selected_recording_path()
+        if path:
+            self._start_reference_preview(path, self.preview_recording_button)
+
+    def open_recordings_folder(self):
+        os.makedirs(self.recordings_directory, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.recordings_directory))
 
     # --- Reference audio recording ---
 
@@ -1499,8 +1745,8 @@ class ChatterboxApp(QMainWindow):
             wav_file.setsampwidth(2)
             wav_file.setframerate(audio_format.sampleRate())
             wav_file.writeframes(pcm16.tobytes())
-        self.ref_audio_path_label.setText(os.path.basename(output_path))
-        self.ref_audio_path_label.setToolTip(output_path)
+        self.set_reference_audio(output_path)
+        self.refresh_recordings_list()
         self.last_reference_audio_dir = self.recordings_directory
         peak = float(np.max(np.abs(mono))) if mono.size else 0.0
         print(f"Saved reference recording ({duration:.1f}s, peak {peak:.3f}): {output_path}")
@@ -2188,6 +2434,7 @@ class ChatterboxApp(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    ui_theme.apply_theme(app)
     window = ChatterboxApp()
     window.show()
     sys.exit(app.exec())
