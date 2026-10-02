@@ -74,29 +74,57 @@ def main():
                 torch.cuda.manual_seed_all(int(req["seed"]))
         sampling = {key: req[key] for key in ("temperature", "top_p", "repetition_penalty")
                     if req.get(key) is not None}
-        language = req.get("language") or None
+        # A batch of texts runs as one call: per-step overhead (not GPU compute) dominates
+        # single-sequence decoding, so batching sections multiplies throughput.
+        texts = req.get("texts") or [req["text"]]
         mode = req["mode"]
+        wavs, sr = run_batch(model, mode, texts, req, sampling)
+        out_paths = req.get("out_paths") or [req["out_path"]]
+        seconds = []
+        for wav, path in zip(wavs, out_paths):
+            wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+            sf.write(path, wav, sr, subtype="FLOAT")
+            seconds.append(round(len(wav) / sr, 2))
+        return {"paths": out_paths[:len(wavs)], "path": out_paths[0], "sr": int(sr),
+                "seconds": seconds}
+
+    def run_batch(model, mode, texts, req, sampling):
+        """Generate a batch; if the GPU runs out of memory, split it and retry."""
+        try:
+            return generate_texts(model, mode, texts, req, sampling)
+        except torch.cuda.OutOfMemoryError:
+            if len(texts) == 1:
+                raise
+            torch.cuda.empty_cache()
+            half = len(texts) // 2
+            print(f"GPU memory full for a batch of {len(texts)}; retrying as {half} + "
+                  f"{len(texts) - half}.", file=sys.stderr)
+            first, sr = run_batch(model, mode, texts[:half], req, sampling)
+            second, _ = run_batch(model, mode, texts[half:], req, sampling)
+            return list(first) + list(second), sr
+
+    def generate_texts(model, mode, texts, req, sampling):
+        count = len(texts)
+        language = [req.get("language") or "auto"] * count
         if mode == "custom_voice":
+            instruct = req.get("instruct") or None
             wavs, sr = model.generate_custom_voice(
-                text=req["text"], speaker=req["speaker"], language=language,
-                instruct=req.get("instruct") or None, **sampling)
+                text=texts, speaker=[req["speaker"]] * count, language=language,
+                instruct=[instruct] * count if instruct else None, **sampling)
         elif mode == "voice_design":
             if not req.get("instruct"):
                 raise ValueError("Describe the voice you want before generating.")
             wavs, sr = model.generate_voice_design(
-                text=req["text"], instruct=req["instruct"], language=language, **sampling)
+                text=texts, instruct=[req["instruct"]] * count, language=language, **sampling)
         elif mode == "base":
             if not req.get("ref_audio"):
                 raise ValueError("Pick a reference clip on the Voice page to clone.")
+            prompt = clone_prompt(req["ref_audio"], req.get("ref_text"))
             wavs, sr = model.generate_voice_clone(
-                text=req["text"], language=language,
-                voice_clone_prompt=clone_prompt(req["ref_audio"], req.get("ref_text")),
-                **sampling)
+                text=texts, language=language, voice_clone_prompt=list(prompt) * count, **sampling)
         else:
             raise ValueError(f"Unknown Qwen mode: {mode}")
-        wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-        sf.write(req["out_path"], wav, sr, subtype="FLOAT")
-        return {"path": req["out_path"], "sr": int(sr), "seconds": round(len(wav) / sr, 2)}
+        return wavs, sr
 
     reply(ok=True, event="ready", cuda=torch.cuda.is_available(),
           device=torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu")

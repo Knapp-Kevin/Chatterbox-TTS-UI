@@ -210,12 +210,15 @@ RECORDING_SAMPLE_RATE = 48000
 MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
 PREVIEW_MAX_SECTIONS = 2
+# Batched engines: a batch costs about longest_section_chars * rate * (1 + slope * sections).
+# Fitted on an RTX 5070 Ti (Qwen3 1.7B): 16 sections ~78 s, 2 sections ~28 s.
+BATCH_COST_SLOPE = 0.07
 # Initial generation-speed guesses (seconds per character), refined by measurement.
 # Initial speed guesses (seconds of generation per character of text) per engine
 # and device; replaced by measurements as each model is used.
 DEFAULT_SECONDS_PER_CHAR = {
     ("chatterbox", "cuda"): 0.045, ("chatterbox", "cpu"): 0.35,
-    ("qwen3", "cuda"): 0.2, ("qwen3", "cpu"): 2.0,
+    ("qwen3", "cuda"): 0.13, ("qwen3", "cpu"): 2.0,  # Qwen on CUDA: see BATCH_COST_SLOPE
 }
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
@@ -512,8 +515,8 @@ class ModelLoaderThread(QThread):
 class AudioGeneratorThread(QThread):
     generation_complete = Signal(str, int)
     error_occurred = Signal(str)
-    chunk_generated = Signal(int, int)
-    section_timed = Signal(int, float)  # characters, seconds
+    chunk_generated = Signal(int, int, int)  # first, last, total
+    section_timed = Signal(int, int, float)  # characters (longest in a batch), sections, seconds
 
     def __init__(
         self,
@@ -608,7 +611,20 @@ class AudioGeneratorThread(QThread):
 
             all_audio_tensors = []
             sr = self.model.sr
-            for i, chunk_text in enumerate(final_chunks):
+            # Engines that support it (Qwen) generate several sections per call.
+            batch_size = max(1, int(getattr(self.model, "batch_size", 1)))
+            generate_kwargs = dict(
+                audio_prompt_path=self.audio_prompt_path if self.audio_prompt_path else None,
+                exaggeration=self.exaggeration,
+                temperature=self.temperature,
+                cfg_weight=self.cfg_weight,
+                language_id=self.language_id,
+                repetition_penalty=self.repetition_penalty,
+                min_p=self.min_p,
+                top_p=self.top_p,
+            )
+            i = 0
+            while i < total_chunks:
                 if self._is_stopped:
                     if all_audio_tensors and not self.preview:
                         # Keep the finished sections of a long render.
@@ -618,27 +634,26 @@ class AudioGeneratorThread(QThread):
                     self.error_occurred.emit(
                         f"Generation stopped by user at chunk {i+1}/{total_chunks}.")
                     return
+                batch = final_chunks[i:i + batch_size]
                 current_chunk_num = i + 1
-                self.chunk_generated.emit(current_chunk_num, total_chunks)
-                print(
-                    f"\nGenerating chunk {current_chunk_num}/{total_chunks} (seed: {self.actual_seed_used}).")
+                last = i + len(batch)
+                self.chunk_generated.emit(current_chunk_num, last, total_chunks)
+                span = f"{current_chunk_num}" if len(batch) == 1 else f"{current_chunk_num}-{last}"
+                print(f"\nGenerating section {span}/{total_chunks} (seed: {self.actual_seed_used}).")
                 section_started = time.monotonic()
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    wav_tensor_chunk = self.model.generate(
-                        chunk_text,
-                        audio_prompt_path=self.audio_prompt_path if self.audio_prompt_path else None,
-                        exaggeration=self.exaggeration,
-                        temperature=self.temperature,
-                        cfg_weight=self.cfg_weight,
-                        language_id=self.language_id,
-                        repetition_penalty=self.repetition_penalty,
-                        min_p=self.min_p,
-                        top_p=self.top_p,
-                    )
-                if wav_tensor_chunk.ndim == 1:
-                    wav_tensor_chunk = wav_tensor_chunk.unsqueeze(0)
-                all_audio_tensors.append(wav_tensor_chunk.cpu())
-                self.section_timed.emit(len(chunk_text), time.monotonic() - section_started)
+                    if len(batch) > 1:
+                        wav_tensors = self.model.generate_batch(batch, **generate_kwargs)
+                    else:
+                        wav_tensors = [self.model.generate(batch[0], **generate_kwargs)]
+                for wav_tensor_chunk in wav_tensors:
+                    if wav_tensor_chunk.ndim == 1:
+                        wav_tensor_chunk = wav_tensor_chunk.unsqueeze(0)
+                    all_audio_tensors.append(wav_tensor_chunk.cpu())
+                # A batch takes as long as its longest section, so time is measured against that.
+                self.section_timed.emit(max(len(text) for text in batch) if len(batch) > 1 else len(batch[0]),
+                                        len(batch), time.monotonic() - section_started)
+                i = last
 
             if self._is_stopped and self.partial_info is None and len(all_audio_tensors) < total_chunks:
                 self.error_occurred.emit("Stopped before final concat.")
@@ -2244,6 +2259,15 @@ class ChatterboxApp(QMainWindow):
         self.is_generating = True
         self.generation_is_preview = preview
         self.generation_char_count = len(text)
+        lengths = self.section_lengths(text)
+        if preview:
+            lengths = lengths[:PREVIEW_MAX_SECTIONS]
+        plan_entry = self.loaded_entry() or self.get_selected_model_entry()
+        self.generation_plan = self.batch_plan(plan_entry, lengths)
+        self.generation_estimate = sum(cost for _f, _l, cost in self.generation_plan)
+        self.progress_range = None
+        self.progress_done_cost = 0.0
+        self.progress_done_time = 0.0
         self.generation_started_at = time.monotonic()
         self.keep_take_button.setVisible(False)
         self.generate_button.setText("Stop")
@@ -2327,6 +2351,8 @@ class ChatterboxApp(QMainWindow):
 
     def speed_key(self, entry):
         variant = entry.get("qwen_variant") or entry.get("multilingual_t3_model") or ""
+        if entry.get("backend") == QWEN_BACKEND and self.speed_device() == "cuda":
+            variant += f"|batch{qwen_engine.BATCH_SIZE}"
         return f"{self.speed_device()}|{entry.get('repo_id')}|{entry.get('backend')}|{variant}"
 
     def seconds_per_char_for(self, entry):
@@ -2345,13 +2371,40 @@ class ChatterboxApp(QMainWindow):
     def loaded_entry(self):
         return next((e for e in self.model_entries if self.entry_key(e) == self.loaded_entry_key()), None)
 
-    def model_estimates(self, characters):
+    def batch_size_for(self, entry):
+        if entry.get("backend") == QWEN_BACKEND and self.speed_device() == "cuda":
+            return qwen_engine.BATCH_SIZE
+        return 1
+
+    def batch_plan(self, entry, lengths):
+        """[(first, last, estimated seconds)] for generating sections of these lengths."""
+        rate, _measured = self.seconds_per_char_for(entry)
+        size = self.batch_size_for(entry)
+        plan = []
+        for start in range(0, len(lengths), size):
+            batch = lengths[start:start + size]
+            if size > 1:
+                cost = max(batch) * (1 + BATCH_COST_SLOPE * len(batch)) * rate
+            else:
+                cost = sum(batch) * rate
+            plan.append((start + 1, start + len(batch), cost))
+        return plan
+
+    def estimate_seconds(self, entry, lengths):
+        _rate, measured = self.seconds_per_char_for(entry)
+        return sum(cost for _first, _last, cost in self.batch_plan(entry, lengths)), measured
+
+    @staticmethod
+    def section_lengths(text):
+        return [len(section) for section in documents.split_into_sections(text)]
+
+    def model_estimates(self, lengths):
         """[(entry, seconds, measured, active)] for every model in the switcher, fastest first."""
         rows = []
         active_key = self.loaded_entry_key() if self.model is not None else None
         for entry in self.get_visible_model_entries():
-            rate, measured = self.seconds_per_char_for(entry)
-            rows.append((entry, characters * rate, measured, self.entry_key(entry) == active_key))
+            seconds, measured = self.estimate_seconds(entry, lengths)
+            rows.append((entry, seconds, measured, self.entry_key(entry) == active_key))
         return sorted(rows, key=lambda row: row[1])
 
     def update_text_stats(self):
@@ -2362,10 +2415,11 @@ class ChatterboxApp(QMainWindow):
             self.estimate_button.setVisible(False)
             self.text_stats_label.setText("Type or paste text, or open a document.")
             return
-        sections = len(documents.split_into_sections(text))
+        lengths = self.section_lengths(text)
+        sections = len(lengths)
         entry = self.loaded_entry() or self.get_selected_model_entry()
-        rate, measured = self.seconds_per_char_for(entry)
-        self.estimate_button.setText(f"About {self.format_duration(len(text) * rate)} \u25be")
+        seconds, measured = self.estimate_seconds(entry, lengths)
+        self.estimate_button.setText(f"About {self.format_duration(seconds)} \u25be")
         self.estimate_button.setVisible(True)
         self.text_stats_label.setText(
             f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters")
@@ -2373,10 +2427,10 @@ class ChatterboxApp(QMainWindow):
         for index in range(self.model_repo_combo.count()):
             position = self.model_repo_combo.itemData(index)
             if isinstance(position, int) and position < len(visible):
-                item_rate, item_measured = self.seconds_per_char_for(visible[position])
+                item_seconds, item_measured = self.estimate_seconds(visible[position], lengths)
                 self.model_repo_combo.setItemData(
                     index,
-                    f"About {self.format_duration(len(text) * item_rate)} for the current text"
+                    f"About {self.format_duration(item_seconds)} for the current text"
                     f" ({'measured' if item_measured else 'estimate'})",
                     Qt.ItemDataRole.ToolTipRole)
 
@@ -2389,7 +2443,7 @@ class ChatterboxApp(QMainWindow):
         header.setEnabled(False)
         menu.addSeparator()
         estimates = {self.entry_key(e) + (e["label"],): row
-                     for row in self.model_estimates(len(text)) for e in [row[0]]}
+                     for row in self.model_estimates(self.section_lengths(text)) for e in [row[0]]}
         for _capability, title, members in model_registry.group_by_capability(self.get_visible_model_entries()):
             menu.addSection(title)
             rows = sorted((estimates[self.entry_key(e) + (e["label"],)] for e in members), key=lambda r: r[1])
@@ -2415,7 +2469,7 @@ class ChatterboxApp(QMainWindow):
         if index >= 0:
             self.model_repo_combo.setCurrentIndex(index)
 
-    def on_section_timed(self, characters, seconds):
+    def on_section_timed(self, characters, count, seconds):
         # The first section after a load includes warm-up, so it isn't a fair sample.
         if not self.model_is_warm:
             self.model_is_warm = True
@@ -2423,7 +2477,10 @@ class ChatterboxApp(QMainWindow):
         entry = self.loaded_entry()
         if entry is None or characters < 20:
             return
-        measured = seconds / characters
+        weight = characters
+        if self.batch_size_for(entry) > 1:
+            weight = characters * (1 + BATCH_COST_SLOPE * count)
+        measured = seconds / weight
         rates = self.app_settings.setdefault("speed_by_model", {})
         key = self.speed_key(entry)
         previous = rates.get(key)
@@ -3351,6 +3408,7 @@ class ChatterboxApp(QMainWindow):
             self.set_status_message("Status: Ready.")
 
     def update_generation_time_display(self):
+        self.refresh_progress_activity()
         if self.generation_start_time and self.is_generating:
             elapsed_ms = self.generation_start_time.msecsTo(
                 QTime.currentTime())
@@ -3375,23 +3433,41 @@ class ChatterboxApp(QMainWindow):
             self.set_status_message(
                 f"Status: Generating audio... {minutes:02}:{seconds:02}")
 
-    def on_chunk_generated_progress(self, current_chunk, total_chunks):
+    def on_chunk_generated_progress(self, first, last, total):
         if not self.is_generating:
             return
-        done = current_chunk - 1
+        done = first - 1
         elapsed = time.monotonic() - self.generation_started_at
-        self.generation_progress.setMaximum(total_chunks)
+        # Everything before this batch has just finished: calibrate against the plan.
+        self.progress_done_cost = sum(cost for _f, end, cost in getattr(self, "generation_plan", [])
+                                      if end <= done)
+        self.progress_done_time = elapsed
+        self.progress_range = (first, last, total)
+        self.generation_progress.setMaximum(total)
         self.generation_progress.setValue(done)
-        activity = f"{current_chunk}/{total_chunks}"
+        span = f"{first}" if first == last else f"{first}\u2013{last}"
+        self.set_status_message(f"Status: Generating section {span} of {total}...")
+        self.refresh_progress_activity()
+
+    def refresh_progress_activity(self):
+        """Activity text with a countdown; called on progress and every second."""
+        if not self.is_generating or not getattr(self, "progress_range", None):
+            return
+        first, last, total = self.progress_range
+        elapsed = time.monotonic() - self.generation_started_at
+        estimate = getattr(self, "generation_estimate", 0.0)
+        if self.progress_done_cost > 0:
+            projected = self.progress_done_time / self.progress_done_cost * estimate
+        else:
+            projected = estimate
+        remaining = max(projected - elapsed, 0.0)
+        span = f"{first}" if first == last else f"{first}\u2013{last}"
+        activity = f"{span}/{total}"
         if self.generation_is_preview:
             activity = f"Preview {activity}"
-        if done:
-            remaining = elapsed / done * (total_chunks - done)
-            activity += f" \u00b7 {self.format_clock(remaining)} left"
-        else:
-            activity += f" \u00b7 {self.format_clock(elapsed)}"
+        if estimate > 0:
+            activity += f" \u00b7 {self.format_clock(remaining)} left" if remaining >= 1 else " \u00b7 finishing"
         self.activity_label.setText(activity)
-        self.set_status_message(f"Status: Generating section {current_chunk}/{total_chunks}...")
 
     def on_generation_complete(self, output_path, sample_rate):
         # self.is_generating will be set to False by on_generation_thread_finished

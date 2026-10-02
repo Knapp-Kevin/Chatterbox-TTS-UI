@@ -23,6 +23,10 @@ PYTHON = os.path.join(ENGINE_DIR, ".venv", "Scripts" if os.name == "nt" else "bi
                       "python.exe" if os.name == "nt" else "python")
 WORKER = os.path.join(ENGINE_DIR, "qwen_worker.py")
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
+# Measured on an RTX 5070 Ti (1.7B, bf16): 12 sections took 181 s one at a time and 18 s as
+# one batch, with peak VRAM rising only ~0.2 GB per extra section. The worker halves a batch
+# and retries if the GPU runs out of memory.
+BATCH_SIZE = 16
 
 VARIANTS = {
     "custom_voice": "Preset voices with style instructions",
@@ -134,6 +138,9 @@ class QwenModel:
         self.device = worker.device
         self.supported_languages = {code: LANGUAGE_LABELS[code] for code, name in LANGUAGE_NAMES.items()
                                     if not languages or name in languages}
+        # Sections generated per worker call. Decoding one sequence leaves the GPU mostly
+        # idle (per-step overhead dominates), so batches are several times faster.
+        self.batch_size = BATCH_SIZE if self.device == "cuda" else 1
         # Set by the UI before each generation.
         self.speaker = speakers[0] if speakers else None
         self.instruct = ""
@@ -145,22 +152,30 @@ class QwenModel:
     def to(self, _device):
         return self
 
-    def generate(self, text, audio_prompt_path=None, exaggeration=0.5, temperature=0.8,
-                 cfg_weight=0.5, language_id=None, repetition_penalty=1.2, min_p=0.05, top_p=1.0):
-        out_path = os.path.join(self._temp_dir, "section.wav")
+    def generate(self, text, **kwargs):
+        return self.generate_batch([text], **kwargs)[0]
+
+    def generate_batch(self, texts, audio_prompt_path=None, exaggeration=0.5, temperature=0.8,
+                       cfg_weight=0.5, language_id=None, repetition_penalty=1.2, min_p=0.05,
+                       top_p=1.0):
+        """Generate several sections in one worker call; returns one (1, n) tensor each."""
+        out_paths = [os.path.join(self._temp_dir, f"section_{index}.wav") for index in range(len(texts))]
         reply = self.worker.request(
-            cmd="generate", mode=self.mode, text=text,
+            cmd="generate", mode=self.mode, texts=list(texts),
             language=LANGUAGE_NAMES.get(language_id or "", None),
             speaker=self.speaker, instruct=self.instruct.strip(),
             ref_audio=audio_prompt_path, ref_text=self.ref_text.strip() or None,
-            seed=int(torch.initial_seed() % 2**31), out_path=out_path,
+            seed=int(torch.initial_seed() % 2**31), out_paths=out_paths,
             temperature=float(temperature), top_p=float(top_p),
             repetition_penalty=float(repetition_penalty))
-        wav, sr = sf.read(reply["path"], dtype="float32")
-        self.sr = sr
-        if self.watermark:
-            wav = self._apply_watermark(wav, sr)
-        return torch.from_numpy(np.ascontiguousarray(wav)).unsqueeze(0)
+        results = []
+        for path in reply["paths"]:
+            wav, sr = sf.read(path, dtype="float32")
+            self.sr = sr
+            if self.watermark:
+                wav = self._apply_watermark(wav, sr)
+            results.append(torch.from_numpy(np.ascontiguousarray(wav)).unsqueeze(0))
+        return results
 
     def _apply_watermark(self, wav, sr):
         try:
