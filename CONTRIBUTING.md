@@ -48,6 +48,8 @@ If you're looking to contribute code, here's a quick guide to setting up your de
     Alternatively, follow the manual installation steps in the `README.md`.
 5.  **Make Your Changes:** Create a new branch and start coding!
 6.  **Testing:** Run the application (`python main.py`) to test your changes.
+7.  **Where things live:** `main.py` holds the UI and generation thread; engine, model-list and Hugging Face logic is in `model_registry.py`; document splitting in `documents.py`; audio processing in `audio_effects.py`; the theme in `ui_theme.py`. The README's Project Structure section lists everything.
+8.  **Qwen engine:** Qwen3-TTS runs in its own environment, `engines/qwen/.venv`, through `engines/qwen/qwen_worker.py`. Never install `qwen-tts` into the main `.venv`: it needs `transformers` 4.57.x, while Chatterbox pins 5.2.0. To work on the worker, run Python from `engines/qwen/.venv`.
 
 ## Code of Conduct
 

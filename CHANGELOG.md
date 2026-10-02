@@ -1,0 +1,56 @@
+# Changelog
+
+All notable changes to this fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI) are listed here.
+
+## [Unreleased] - 2026-10-02
+
+Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell launcher flow").
+
+### Added
+- **Qwen3-TTS engine (optional).** Three new models alongside Chatterbox:
+  - **Preset voices**, with nine speakers and plain-language style instructions.
+  - **Voice design**, which creates a voice from a written description.
+  - **Voice cloning**, which can use a transcript of the clip for closer likeness.
+
+  Qwen runs in its own environment, which the app offers to install. Its output can carry the same AI watermark as Chatterbox.
+- **Faster Qwen documents.** Long text is generated in batches (up to 16 sections or about 5,000 characters per call), roughly 5× faster. Oversized batches are split automatically if the GPU runs out of memory.
+- **In-app voice recording.** A guided window with countdown, live level meter, too-quiet and clipping warnings, a 30-second limit, and phonetically rich read-aloud passages. Recordings save the passage as a transcript for Qwen cloning.
+- **Document narration:**
+  - Open `.txt`, `.md` or `.docx` files.
+  - **Preview** a sample, and **Keep this take** so the full render matches.
+  - A live estimate of the time and number of sections.
+  - Progress with time remaining, and **Stop** keeps finished sections as a `_partial` file.
+- **Per-model time estimates.** Every model's estimated time for the current text, learned from your own runs. The estimate is a menu: pick a model from it to switch.
+- **Model management in the app:**
+  - Add, edit, duplicate, hide and remove models.
+  - **Check** a Hugging Face repo before downloading.
+  - **Find models** searches Hugging Face for repos this app can load.
+- **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
+- **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
+- **Advanced page:** speed and pitch changes (formant-preserving) and MP3 export, with a note that they can weaken the AI watermark.
+- **Voice page:** preview the current voice, return to the default voice, and use or preview saved recordings.
+
+### Changed
+- **New interface:**
+  - Sidebar pages (Generate, Voice, Model, Advanced, Log).
+  - A light/dark theme that follows Windows, with depth and texture.
+  - Plain-language controls: Expressiveness, Pacing, Variation, Take number.
+- **Models are grouped by what they do:** voice cloning, preset voices, voice design.
+- **Text is split where a reader would pause:**
+  - Never across paragraphs or headings.
+  - Overlong sentences split at clause breaks, not mid-phrase.
+  - Qwen sections can hold whole paragraphs.
+  - Pauses depend on the type of join.
+- **The window sizes itself to its content,** so nothing needs scrolling.
+- **Generated audio is saved as standard 16-bit WAV** (previously 32-bit float), with optional volume levelling and silence trimming.
+- **Model settings** (repetition, min-p, top-p) are now remembered between sessions.
+
+### Fixed
+- **Windows installer:**
+  - Batch files are now checked out with Windows line endings. Before, steps could run out of order and report success after a failure.
+  - Newer NVIDIA drivers no longer cause a CPU-only PyTorch install.
+  - A dependency URL conflict that newer `uv` versions reject is resolved.
+- **Qwen works offline** once its models are downloaded.
+- **A slider rounding error:** Expressiveness could go below its minimum (0.20 instead of 0.25).
+- **Windows-1252 text files** now open correctly.
+- **Cancelling the file browser** no longer clears the selected voice.
