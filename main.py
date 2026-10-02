@@ -130,8 +130,11 @@ from PySide6.QtWidgets import (
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import (
+    QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
+)
 from PySide6.QtGui import QDesktopServices
+import wave
 
 try:
     import model_backends as chatterbox_backends
@@ -186,6 +189,11 @@ MAX_TEXT_INPUT_LENGTH = 280
 EFFECTIVE_MAX_CHUNK_LENGTH = MAX_TEXT_INPUT_LENGTH - 20
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
+REFERENCE_RECORDINGS_DIRNAME = "reference_recordings"
+RECORDING_SAMPLE_RATE = 48000
+MIN_RECORDING_SECONDS = 3
+MAX_RECORDING_SECONDS = 30
+SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 DEFAULT_LANGUAGE_TEST_TEXTS = {
     "ar": "مرحبا. هذا اختبار قصير للنموذج متعدد اللغات.",
     "da": "Hej. Dette er en kort test af den flersprogede model.",
@@ -659,6 +667,15 @@ class ChatterboxApp(QMainWindow):
         if not os.path.exists(self.output_directory):
             os.makedirs(self.output_directory)
         self.last_reference_audio_dir = self.script_dir
+        self.recordings_directory = os.path.join(
+            self.script_dir, REFERENCE_RECORDINGS_DIRNAME)
+        self.media_devices = QMediaDevices(self)
+        self.audio_source = None
+        self.recording_io = None
+        self.recording_format = None
+        self.recording_buffer = bytearray()
+        self.recording_timer = QTimer(self)
+        self.recording_timer.timeout.connect(self.update_recording_display)
 
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -731,7 +748,27 @@ class ChatterboxApp(QMainWindow):
         )
         browse_ref_button = QPushButton("Browse Reference Audio...")
         browse_ref_button.clicked.connect(self.browse_reference_audio)
+        self.mic_combo = QComboBox()
+        self.mic_combo.setMaximumWidth(220)
+        self.mic_combo.setToolTip("Microphone used for recording a reference clip.")
+        self.record_button = QPushButton("Record")
+        self.record_button.setToolTip(
+            "Record a reference clip from the selected microphone "
+            f"({MIN_RECORDING_SECONDS}-{MAX_RECORDING_SECONDS} s; "
+            "about 10-15 s of clean speech works best).")
+        self.record_button.clicked.connect(self.toggle_recording)
+        self.media_devices.audioInputsChanged.connect(self.populate_microphones)
+        self.populate_microphones()
+        self.record_level_bar = QProgressBar()
+        self.record_level_bar.setRange(0, 100)
+        self.record_level_bar.setTextVisible(False)
+        self.record_level_bar.setFixedWidth(80)
+        self.record_level_bar.setToolTip("Microphone input level")
+        self.record_level_bar.setVisible(False)
         ref_audio_layout.addWidget(self.ref_audio_path_label, 1)
+        ref_audio_layout.addWidget(self.record_level_bar)
+        ref_audio_layout.addWidget(self.mic_combo)
+        ref_audio_layout.addWidget(self.record_button)
         ref_audio_layout.addWidget(browse_ref_button)
         top_controls_layout = QGridLayout()
         top_controls_layout.setColumnStretch(1, 1)
@@ -1099,6 +1136,181 @@ class ChatterboxApp(QMainWindow):
         else:
             self.ref_audio_path_label.setText("None selected.")
             self.ref_audio_path_label.setToolTip("")
+
+    # --- Reference audio recording ---
+
+    def populate_microphones(self):
+        previous = self.mic_combo.currentData()
+        previous_id = previous.id() if previous is not None else None
+        self.mic_combo.blockSignals(True)
+        self.mic_combo.clear()
+        default_id = QMediaDevices.defaultAudioInput().id()
+        for device in QMediaDevices.audioInputs():
+            label = device.description()
+            if device.id() == default_id:
+                label += " (default)"
+            self.mic_combo.addItem(label, device)
+        selected_index = 0
+        for index in range(self.mic_combo.count()):
+            device_id = self.mic_combo.itemData(index).id()
+            if device_id == previous_id or (previous_id is None and device_id == default_id):
+                selected_index = index
+                break
+        self.mic_combo.setCurrentIndex(selected_index)
+        self.mic_combo.blockSignals(False)
+        has_inputs = self.mic_combo.count() > 0
+        if not has_inputs:
+            self.mic_combo.addItem("No microphone found")
+        self.mic_combo.setEnabled(has_inputs and self.audio_source is None)
+        self.record_button.setEnabled(has_inputs or self.audio_source is not None)
+
+    def _choose_recording_format(self, device):
+        audio_format = QAudioFormat()
+        audio_format.setSampleRate(RECORDING_SAMPLE_RATE)
+        audio_format.setChannelCount(1)
+        audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        if device.isFormatSupported(audio_format):
+            return audio_format
+        return device.preferredFormat()
+
+    def _pcm_to_mono_float(self, data, audio_format):
+        sample_format = audio_format.sampleFormat()
+        dtypes = {
+            QAudioFormat.SampleFormat.UInt8: (np.uint8, 128.0, 128.0),
+            QAudioFormat.SampleFormat.Int16: (np.int16, 0.0, 32768.0),
+            QAudioFormat.SampleFormat.Int32: (np.int32, 0.0, 2147483648.0),
+            QAudioFormat.SampleFormat.Float: (np.float32, 0.0, 1.0),
+        }
+        if sample_format not in dtypes:
+            raise ValueError(f"Unsupported microphone sample format: {sample_format}")
+        dtype, offset, scale = dtypes[sample_format]
+        item_size = np.dtype(dtype).itemsize
+        channels = max(1, audio_format.channelCount())
+        frame_size = item_size * channels
+        data = data[:len(data) - len(data) % frame_size]
+        samples = np.frombuffer(data, dtype=dtype).astype(np.float32)
+        samples = (samples - offset) / scale
+        return samples.reshape(-1, channels).mean(axis=1)
+
+    def toggle_recording(self):
+        if self.audio_source is not None:
+            self.stop_recording(save=True)
+        else:
+            self.start_recording()
+
+    def start_recording(self):
+        device = self.mic_combo.currentData()
+        if device is None or device.isNull():
+            QMessageBox.warning(self, "No Microphone",
+                                "No audio input device is available.")
+            return
+        self.recording_format = self._choose_recording_format(device)
+        self.recording_buffer = bytearray()
+        self.recording_level = 0.0
+        self.audio_source = QAudioSource(device, self.recording_format, self)
+        self.recording_io = self.audio_source.start()
+        error = self.audio_source.error()
+        if self.recording_io is None or getattr(error, "name", "NoError") != "NoError":
+            self._teardown_audio_source()
+            QMessageBox.warning(
+                self, "Recording Failed",
+                f"Could not open '{device.description()}' ({getattr(error, 'name', error)}).\n\n"
+                "Check that the microphone is connected and that Windows allows "
+                "desktop apps to access it (Settings > Privacy & security > Microphone).")
+            return
+        print(
+            f"Recording reference audio from '{device.description()}' "
+            f"({self.recording_format.sampleRate()} Hz, "
+            f"{self.recording_format.channelCount()} ch).")
+        self.mic_combo.setEnabled(False)
+        self.record_level_bar.setValue(0)
+        self.record_level_bar.setVisible(True)
+        self.recording_timer.start(100)
+        self.update_recording_display()
+
+    def _read_recording_data(self):
+        if self.recording_io is None:
+            return
+        chunk = bytes(self.recording_io.readAll().data())
+        if not chunk:
+            return
+        self.recording_buffer.extend(chunk)
+        levels = self._pcm_to_mono_float(chunk, self.recording_format)
+        if levels.size:
+            self.recording_level = float(np.max(np.abs(levels)))
+
+    def _recorded_seconds(self):
+        bytes_per_frame = self.recording_format.bytesPerFrame()
+        if not bytes_per_frame:
+            return 0.0
+        frames = len(self.recording_buffer) / bytes_per_frame
+        return frames / self.recording_format.sampleRate()
+
+    def update_recording_display(self):
+        if self.audio_source is None:
+            return
+        self._read_recording_data()
+        elapsed = self._recorded_seconds()
+        self.record_button.setText(f"Stop ({int(elapsed) // 60}:{int(elapsed) % 60:02d})")
+        self.record_level_bar.setValue(int(min(1.0, self.recording_level) * 100))
+        self.set_status_message(
+            f"Status: Recording reference audio... {elapsed:.0f}s "
+            f"(auto-stops at {MAX_RECORDING_SECONDS}s)")
+        if elapsed >= MAX_RECORDING_SECONDS:
+            self.stop_recording(save=True)
+
+    def _teardown_audio_source(self):
+        if self.audio_source is not None:
+            self.audio_source.stop()
+            self.audio_source.deleteLater()
+        self.audio_source = None
+        self.recording_io = None
+
+    def stop_recording(self, save=True):
+        self.recording_timer.stop()
+        self._read_recording_data()
+        self._teardown_audio_source()
+        self.record_button.setText("Record")
+        self.record_level_bar.setVisible(False)
+        self.populate_microphones()
+        if save:
+            self._save_recording()
+        self.recording_buffer = bytearray()
+
+    def _save_recording(self):
+        audio_format = self.recording_format
+        mono = self._pcm_to_mono_float(bytes(self.recording_buffer), audio_format)
+        duration = mono.size / audio_format.sampleRate()
+        if duration < MIN_RECORDING_SECONDS:
+            self.set_status_message("Status: Recording discarded (too short).")
+            QMessageBox.warning(
+                self, "Recording Too Short",
+                f"The recording was {duration:.1f}s. Please record at least "
+                f"{MIN_RECORDING_SECONDS}s; about 10-15s of clear speech works best.")
+            return
+        os.makedirs(self.recordings_directory, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(
+            self.recordings_directory, f"reference_{timestamp}.wav")
+        pcm16 = (np.clip(mono, -1.0, 1.0) * 32767.0).astype("<i2")
+        with wave.open(output_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(audio_format.sampleRate())
+            wav_file.writeframes(pcm16.tobytes())
+        self.ref_audio_path_label.setText(os.path.basename(output_path))
+        self.ref_audio_path_label.setToolTip(output_path)
+        self.last_reference_audio_dir = self.recordings_directory
+        peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        print(f"Saved reference recording ({duration:.1f}s, peak {peak:.3f}): {output_path}")
+        self.set_status_message(
+            f"Status: Recorded {duration:.1f}s reference clip and selected it.")
+        if peak < SILENT_RECORDING_PEAK:
+            QMessageBox.warning(
+                self, "Recording Is Nearly Silent",
+                "The clip was saved and selected, but almost no sound was captured.\n\n"
+                "Check that the right microphone is selected, that it isn't muted, and that "
+                "Windows allows desktop apps to use it (Settings > Privacy & security > Microphone).")
 
     def on_experimental_models_toggled(self, checked):
         self.refresh_model_repo_options()
@@ -1764,6 +1976,8 @@ class ChatterboxApp(QMainWindow):
             APP_LOG_SINK = None
         self.save_window_settings()
         self.save_app_settings()
+        if self.audio_source is not None:
+            self.stop_recording(save=False)
         if hasattr(self, 'model_loader_thread') and self.model_loader_thread.isRunning():
             self.model_loader_thread.quit()
             self.model_loader_thread.wait()

@@ -69,6 +69,7 @@ Windows remains the primary maintained path.
 *   **Simple PySide6 Interface:**
     *   Text input for speech synthesis.
     *   Load reference audio files (`.wav`, `.mp3`, `.flac`) for voice cloning.
+    *   Record a reference clip from a microphone directly in the app.
     *   Model repo picker backed by `models.json`.
     *   Explicit language selector for multilingual models.
     *   `Open models.json` and `Reload Model List` actions.
@@ -157,6 +158,7 @@ Windows remains the primary maintained path.
         *   The token is saved locally in `app_settings.json`, which is ignored by git and should not be shared.
     *   **Enter Text:** Type or paste the text you want to synthesize. Long texts will be automatically chunked and stitched.
     *   **Reference Audio (Optional):** Click "Browse Reference Audio..." to select a `.wav`, `.mp3`, or `.flac` file to clone its voice characteristics.
+        *   Or pick a microphone and click **Record**, speak for about 10-15 seconds, then click **Stop**. The clip is saved to `reference_recordings/` (ignored by git) and selected automatically. Recordings shorter than 3 seconds are discarded, and recording stops automatically at 30 seconds.
     *   **Adjust Parameters:** Use the sliders and seed input to fine-tune the output.
         *   **CFG/Pace:** Lower values (e.g., 0.2-0.4) can slow down speech and improve pacing.
         *   **Exaggeration:** Default 0.5 is usually good. Higher values can be more expressive but also faster.

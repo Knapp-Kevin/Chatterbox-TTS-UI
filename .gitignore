@@ -68,3 +68,6 @@ app_settings.json
 # ignore extra captures used during iteration.
 screenshot_*.png
 !screenshot_1.png
+
+# Microphone recordings made with the in-app Record button
+reference_recordings/
