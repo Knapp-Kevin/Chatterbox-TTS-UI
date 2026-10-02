@@ -140,6 +140,7 @@ import audio_effects
 import documents
 import model_registry
 import qwen_engine
+import kokoro_engine
 import model_tiles
 import math
 import gc
@@ -199,11 +200,27 @@ resolve_multilingual_t3_model = getattr(
 MAX_TEXT_INPUT_LENGTH = documents.MAX_SECTION_LENGTH
 LOSSLESS_FORMATS = ["WAV", "FLAC"]
 QWEN_BACKEND = "qwen3"
+KOKORO_BACKEND = "kokoro"
+# Engines that run in their own environment (engines/<name>), installed on first use.
+ENGINE_MODULES = {QWEN_BACKEND: qwen_engine, KOKORO_BACKEND: kokoro_engine}
+ENGINE_INSTALL_NOTES = {
+    QWEN_BACKEND: ("Qwen", "Qwen3-TTS runs in its own Python environment (engines/qwen) because it "
+                           "needs different library versions than Chatterbox.\n\nInstalling downloads "
+                           "about 3 GB of PyTorch and Qwen packages (less if PyTorch is already "
+                           "cached). Model weights download the first time each Qwen model is loaded."),
+    KOKORO_BACKEND: ("Kokoro", "Kokoro runs in its own Python environment (engines/kokoro) because its "
+                               "text processing needs packages Chatterbox doesn't use.\n\nInstalling "
+                               "downloads PyTorch (about 3 GB, or nothing if another engine already "
+                               "cached it) plus about 300 MB of text-processing packages. The model "
+                               "itself is about 340 MB."),
+}
 
 
 def languages_for_backend(backend):
     if backend == QWEN_BACKEND:
         return dict(qwen_engine.LANGUAGE_LABELS)
+    if backend == KOKORO_BACKEND:
+        return dict(kokoro_engine.LANGUAGE_LABELS)
     return get_supported_languages_for_backend(backend)
 MODEL_CONFIG_FILENAME = "models.json"
 APP_SETTINGS_FILENAME = "app_settings.json"
@@ -221,6 +238,8 @@ BATCH_COST_SLOPE = 0.07
 DEFAULT_SECONDS_PER_CHAR = {
     ("chatterbox", "cuda"): 0.045, ("chatterbox", "cpu"): 0.35,
     ("qwen3", "cuda"): 0.13, ("qwen3", "cpu"): 2.0,  # Qwen on CUDA: see BATCH_COST_SLOPE
+    # Kokoro: ~0.001 s/char warm on an RTX 5070 Ti, plus a little per section.
+    ("kokoro", "cuda"): 0.002, ("kokoro", "cpu"): 0.02,
 }
 SILENT_RECORDING_PEAK = 0.01  # ~ -40 dBFS; quieter usually means a blocked/muted mic
 # Read-aloud passages for reference recordings (~15 s each). Each one covers
@@ -283,16 +302,6 @@ DEFAULT_MODELS_CONFIG = {
             "language_id": "en",
             "multilingual_t3_model": DEFAULT_MULTILINGUAL_T3_MODEL,
         },
-        {
-            "repo_id": DEFAULT_MODEL_REPO,
-            "label": "Legacy English compatibility",
-            "enabled": True,
-            "experimental": True,
-            "test_text": "Hello. This is a quick test of the legacy English Chatterbox loader.",
-            "notes": "Uses the older English-focused loader path for compatibility testing.",
-            "backend": BACKEND_LEGACY,
-            "language_id": "en"
-        }
     ]
 }
 
@@ -486,6 +495,8 @@ class ModelLoaderThread(QThread):
                         "The Qwen engine isn't installed. Use Load this model on the Model page "
                         "to install it.")
                 model_instance = qwen_engine.load_qwen_model(self.repo_id, log=print)
+            elif self.backend == KOKORO_BACKEND:
+                model_instance = kokoro_engine.load_kokoro_model(self.repo_id, log=print)
             else:
                 model_instance = load_chatterbox_model(
                     self.repo_id,
@@ -1005,7 +1016,8 @@ class RecordingDialog(QDialog):
 class FindModelsDialog(QDialog):
     """Search Hugging Face for repos this app can load and pick one to add."""
 
-    ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"))
+    ENGINE_FILTERS = (("All engines", "all"), ("Chatterbox", "chatterbox"), ("Qwen3-TTS", "qwen3"),
+                      ("Kokoro", "kokoro"))
 
     def __init__(self, token, existing_repos, parent=None):
         super().__init__(parent)
@@ -1308,12 +1320,16 @@ class ModelEntryDialog(QDialog):
         self.accept()
 
 
-class QwenInstallThread(QThread):
+class EngineInstallThread(QThread):
     finished_with = Signal(str)
+
+    def __init__(self, engine_module, parent=None):
+        super().__init__(parent)
+        self.engine_module = engine_module
 
     def run(self):
         try:
-            qwen_engine.install(log=print)
+            self.engine_module.install(log=print)
             self.finished_with.emit("")
         except Exception as exc:
             self.finished_with.emit(str(exc))
@@ -1635,9 +1651,10 @@ class ChatterboxApp(QMainWindow):
         self.qwen_watermark_checkbox = QCheckBox("Add AI watermark")
         self.qwen_watermark_checkbox.setChecked(bool(qwen_settings.get("watermark", True)))
         self.qwen_watermark_checkbox.setToolTip(
-            "Qwen doesn't watermark its audio. When ticked, the same inaudible Perth watermark "
+            "Qwen and Kokoro don't watermark their audio. When ticked, the same inaudible Perth watermark "
             "Chatterbox uses is added, so output from every engine is marked the same way.")
         self.qwen_settings = qwen_settings
+        self.kokoro_settings = self.app_settings.get("kokoro", {})
         self.qwen_row.setVisible(False)
         self.qwen_watermark_checkbox.setVisible(False)
 
@@ -1676,6 +1693,7 @@ class ChatterboxApp(QMainWindow):
         self.seed_input.setSpecialValueText("New take each time")
         self.seed_input.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.language_combo = QComboBox()
+        self.language_combo.currentIndexChanged.connect(lambda _i: self.on_language_changed())
         add_control(2, 0, "Language", self.language_combo,
                     "Language of the text. The list depends on the selected model.")
         add_control(1, 2, "Take number", self.seed_input,
@@ -2260,7 +2278,7 @@ class ChatterboxApp(QMainWindow):
             return
         qwen_problem = self.prepare_qwen_generation()
         if qwen_problem:
-            QMessageBox.information(self, "Qwen Voice", qwen_problem)
+            QMessageBox.information(self, "Voice", qwen_problem)
             return
 
         self.is_generating = True
@@ -2367,7 +2385,7 @@ class ChatterboxApp(QMainWindow):
         measured = self.app_settings.get("speed_by_model", {}).get(self.speed_key(entry))
         if measured:
             return measured, True
-        engine = "qwen3" if entry.get("backend") == QWEN_BACKEND else "chatterbox"
+        engine = entry.get("backend") if entry.get("backend") in ENGINE_MODULES else "chatterbox"
         if engine == "chatterbox":
             legacy = self.app_settings.get("seconds_per_char", {}).get(device)  # older single rate
             if legacy:
@@ -2403,8 +2421,8 @@ class ChatterboxApp(QMainWindow):
 
     @staticmethod
     def max_section_chars_for(entry):
-        if entry.get("backend") == QWEN_BACKEND:
-            return qwen_engine.MAX_SECTION_CHARS
+        if entry.get("backend") in ENGINE_MODULES:
+            return ENGINE_MODULES[entry["backend"]].MAX_SECTION_CHARS
         return MAX_TEXT_INPUT_LENGTH
 
     def section_lengths(self, text, entry):
@@ -2535,7 +2553,38 @@ class ChatterboxApp(QMainWindow):
     # --- Engine-specific controls ---
 
     def active_qwen_model(self):
-        return self.model if isinstance(self.model, qwen_engine.QwenModel) else None
+        """The loaded worker-engine model (Qwen or Kokoro), which uses the speaker/style row."""
+        return self.model if isinstance(self.model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)) else None
+
+    def engine_settings(self, model):
+        return self.kokoro_settings if isinstance(model, kokoro_engine.KokoroModel) else self.qwen_settings
+
+    def fill_speaker_combo(self, model):
+        """Built-in voices; Kokoro's are filtered to the selected language."""
+        kokoro = isinstance(model, kokoro_engine.KokoroModel)
+        language = self.language_combo.currentData() or "en"
+        speakers = model.voices_for(language) if kokoro else model.speakers
+        if kokoro:
+            saved = self.kokoro_settings.get("voice_by_language", {}).get(language)
+        else:
+            saved = self.qwen_settings.get("speaker")
+        self.qwen_speaker_combo.blockSignals(True)
+        self.qwen_speaker_combo.clear()
+        for speaker in speakers:
+            label = model.speaker_label(speaker) if kokoro else speaker.replace("_", " ").title()
+            self.qwen_speaker_combo.addItem(label, speaker)
+        index = self.qwen_speaker_combo.findData(saved)
+        if index < 0 and kokoro:
+            index = self.qwen_speaker_combo.findData("af_heart")
+        self.qwen_speaker_combo.setCurrentIndex(max(0, index))
+        self.qwen_speaker_combo.setToolTip(
+            "Built-in Kokoro voice for the selected language." if kokoro else "Built-in Qwen speaker.")
+        self.qwen_speaker_combo.blockSignals(False)
+        self.refresh_voice_chip()
+
+    def on_language_changed(self):
+        if isinstance(self.model, kokoro_engine.KokoroModel) and hasattr(self, "qwen_speaker_combo"):
+            self.fill_speaker_combo(self.model)
 
     def update_engine_controls(self):
         qwen = self.active_qwen_model()
@@ -2545,13 +2594,8 @@ class ChatterboxApp(QMainWindow):
             widget.setVisible(qwen is None)
         if qwen is not None:
             mode = qwen.mode
-            self.qwen_speaker_combo.blockSignals(True)
-            self.qwen_speaker_combo.clear()
-            for speaker in qwen.speakers:
-                self.qwen_speaker_combo.addItem(speaker.replace("_", " ").title(), speaker)
-            saved = self.qwen_speaker_combo.findData(self.qwen_settings.get("speaker"))
-            self.qwen_speaker_combo.setCurrentIndex(max(0, saved))
-            self.qwen_speaker_combo.blockSignals(False)
+            self.fill_speaker_combo(qwen)
+            self.qwen_watermark_checkbox.setChecked(bool(self.engine_settings(qwen).get("watermark", True)))
             if mode == "voice_design":
                 self.qwen_instruct_label.setText("Voice description")
                 self.qwen_instruct_input.setPlaceholderText(
@@ -2562,8 +2606,9 @@ class ChatterboxApp(QMainWindow):
                 self.qwen_instruct_input.setPlaceholderText(
                     "Optional, e.g. excited and upbeat, or whisper softly")
                 self.qwen_instruct_input.setText(self.qwen_settings.get("style", ""))
+            self.qwen_speaker_label.setText("Voice" if mode == "preset" else "Speaker")
             for widget in (self.qwen_speaker_label, self.qwen_speaker_combo):
-                widget.setVisible(mode == "custom_voice")
+                widget.setVisible(mode in ("custom_voice", "preset"))
             for widget in (self.qwen_instruct_label, self.qwen_instruct_input):
                 widget.setVisible(mode in ("custom_voice", "voice_design"))
             for widget in (self.qwen_transcript_label, self.qwen_transcript_input):
@@ -2575,9 +2620,10 @@ class ChatterboxApp(QMainWindow):
     def refresh_voice_chip(self):
         qwen = self.active_qwen_model()
         reference = self.ref_audio_path_label.toolTip()
-        if qwen is not None and qwen.mode == "custom_voice":
-            text = f"Preset: {self.qwen_speaker_combo.currentText() or 'speaker'}"
-            tip = "A built-in Qwen speaker. Reference clips aren't used by this model."
+        if qwen is not None and qwen.mode in ("custom_voice", "preset"):
+            name = self.qwen_speaker_combo.currentText().split(" (")[0]
+            text = f"Preset: {name or 'speaker'}"
+            tip = "A built-in voice. Reference clips aren't used by this model."
         elif qwen is not None and qwen.mode == "voice_design":
             text, tip = "Designed voice", "Described in the Delivery card below."
         elif reference:
@@ -2601,9 +2647,15 @@ class ChatterboxApp(QMainWindow):
         if qwen.mode == "base" and not self.ref_audio_path_label.toolTip():
             return "Choose a reference clip on the Voice page; Qwen cloning needs one."
         qwen.speaker = self.qwen_speaker_combo.currentData() or qwen.speaker
+        qwen.watermark = self.qwen_watermark_checkbox.isChecked()
+        if isinstance(qwen, kokoro_engine.KokoroModel):
+            language = self.language_combo.currentData() or "en"
+            self.kokoro_settings.setdefault("voice_by_language", {})[language] = qwen.speaker
+            self.kokoro_settings["watermark"] = qwen.watermark
+            self.app_settings["kokoro"] = self.kokoro_settings
+            return None
         qwen.instruct = instruct
         qwen.ref_text = self.qwen_transcript_input.text().strip() if qwen.mode == "base" else ""
-        qwen.watermark = self.qwen_watermark_checkbox.isChecked()
         key = "description" if qwen.mode == "voice_design" else "style"
         self.qwen_settings.update({key: instruct, "speaker": qwen.speaker, "watermark": qwen.watermark})
         self.app_settings["qwen"] = self.qwen_settings
@@ -2945,6 +2997,45 @@ class ChatterboxApp(QMainWindow):
             "None yet. Add one from Discover below.")
         self.render_discover_tiles()
 
+    def engine_installed(self, entry):
+        module = ENGINE_MODULES.get(entry.get("backend"))
+        return module is None or module.is_installed()
+
+    def gpu_memory(self):
+        """(name, GB) of the first CUDA GPU, or None."""
+        if not hasattr(self, "_gpu_memory"):
+            self._gpu_memory = None
+            try:
+                if torch.cuda.is_available():
+                    props = torch.cuda.get_device_properties(0)
+                    self._gpu_memory = (props.name, props.total_memory / 1024 ** 3)
+            except Exception:
+                pass
+        return self._gpu_memory
+
+    def hardware_line(self, backend, repo_id):
+        """(kind, text, tooltip) comparing a model's GPU memory needs with this PC."""
+        needs = model_registry.hardware_needs(backend, repo_id)
+        wanted = f"{needs.min_gb:g} GB" if needs.good_gb == needs.min_gb else \
+            f"{needs.min_gb:g}\u2013{needs.good_gb:g} GB"
+        gpu = self.gpu_memory()
+        detail = (f"Needs about {needs.min_gb:g} GB of GPU memory"
+                  + ("" if needs.good_gb == needs.min_gb else f", {needs.good_gb:g} GB for full speed")
+                  + f". {needs.note}")
+        if gpu is None:
+            if needs.cpu_ok:
+                return "tight", "No GPU found: runs on the CPU", detail + "\nNo NVIDIA GPU was found."
+            return "short", f"Needs an NVIDIA GPU ({needs.min_gb:g} GB+)", detail
+        name, memory = gpu
+        detail += f"\nYour GPU: {name}, {memory:.0f} GB."
+        if memory + 0.5 >= needs.good_gb:
+            return "good", f"\u2713 GPU {wanted} \u00b7 yours {memory:.0f} GB", detail
+        if memory + 0.5 >= needs.min_gb:
+            return "tight", f"! GPU {wanted} \u00b7 yours {memory:.0f} GB", \
+                detail + "\nIt runs, but slower than on a bigger GPU."
+        fallback = " (CPU, slow)" if needs.cpu_ok else ""
+        return "short", f"\u2717 Needs {needs.min_gb:g} GB GPU{fallback} \u00b7 yours {memory:.0f} GB", detail
+
     def typical_speed_text(self, entry):
         """Estimated time for 1,000 characters, split the way generation would split them."""
         count = max(1, math.ceil(1000 / (self.max_section_chars_for(entry) * 0.85)))
@@ -2963,8 +3054,8 @@ class ChatterboxApp(QMainWindow):
         badges = []
         if active:
             badges.append(("active", "Loaded", "This model is loaded and ready to generate."))
-        elif entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
-            badges.append(("status", "Needs engine", "Click to install the Qwen engine (about 3 GB)."))
+        elif not self.engine_installed(entry):
+            badges.append(("status", "Needs engine", "Click to install this engine (it runs in its own environment)."))
         elif model_registry.is_downloaded(entry):
             size = model_registry.format_size(self.model_cache_sizes.get(repo, 0))
             badges.append(("status", f"Ready \u00b7 {size}", "Downloaded; loads from the local cache."))
@@ -2984,8 +3075,10 @@ class ChatterboxApp(QMainWindow):
             "" if entry.get("enabled", True) else "Hidden from the model switcher on the Generate page.",
             f"Speed {'measured from your runs' if measured else 'estimated until you generate with it'}.",
             "" if active else "Click to load. Right-click for more.") if line)
+        needs = self.hardware_line(entry.get("backend"), repo)
+        tooltip += "\n" + needs[2]
         tile = model_tiles.ModelTile(entry["label"], subtitle, badges, speed, tooltip,
-                                     active=active, with_menu=True)
+                                     active=active, with_menu=True, needs=needs)
         tile.clicked.connect(lambda e=entry: self.load_entry(e))
         tile.menu_requested.connect(lambda pos, e=entry: self.show_model_menu(e, pos))
         return tile
@@ -3086,7 +3179,10 @@ class ChatterboxApp(QMainWindow):
         if result.updated:
             detail += f" \u00b7 {result.updated}"
         tooltip = f"{result.repo_id}\n{result.summary}\nClick to add it to your models."
-        tile = model_tiles.ModelTile(name, f"{owner} \u00b7 {result.summary}", badges, detail, tooltip)
+        needs = self.hardware_line(result.backend, result.repo_id)
+        tooltip += "\n" + needs[2]
+        tile = model_tiles.ModelTile(name, f"{owner} \u00b7 {result.summary}", badges, detail, tooltip,
+                                     needs=needs)
         tile.clicked.connect(lambda r=result: self.add_from_discover(r))
         tile.menu_requested.connect(lambda _pos, r=result: QDesktopServices.openUrl(
             QUrl(f"https://huggingface.co/{r.repo_id}")))
@@ -3160,8 +3256,8 @@ class ChatterboxApp(QMainWindow):
         if self.model_busy():
             self.set_status_message("Status: Wait for the current load or generation to finish.")
             return
-        if entry.get("backend") == QWEN_BACKEND and not qwen_engine.is_installed():
-            self.install_qwen_engine(entry)
+        if not self.engine_installed(entry):
+            self.install_engine(entry)
             return
         index = self.model_repo_combo.findText(entry["label"])
         if index >= 0 and index != self.model_repo_combo.currentIndex():
@@ -3169,30 +3265,28 @@ class ChatterboxApp(QMainWindow):
         elif self.entry_key(entry) != self.loaded_entry_key() or self.model is None:
             self.load_model(entry)
 
-    def install_qwen_engine(self, entry=None):
-        if getattr(self, "qwen_install_thread", None) is not None and self.qwen_install_thread.isRunning():
-            self.set_status_message("Status: The Qwen engine is still installing. Progress is on the Log page.")
+    def install_engine(self, entry):
+        backend = entry.get("backend")
+        name, note = ENGINE_INSTALL_NOTES[backend]
+        if getattr(self, "engine_install_thread", None) is not None and self.engine_install_thread.isRunning():
+            self.set_status_message("Status: An engine is still installing. Progress is on the Log page.")
             return
-        answer = QMessageBox.question(
-            self, "Install Qwen Engine",
-            "Qwen3-TTS runs in its own Python environment (engines/qwen) because it needs "
-            "different library versions than Chatterbox.\n\nInstalling downloads about 3 GB of "
-            "PyTorch and Qwen packages (less if PyTorch is already cached). Model weights "
-            "download the first time each Qwen model is loaded.\n\nInstall now?")
+        answer = QMessageBox.question(self, f"Install {name} Engine", f"{note}\n\nInstall now?")
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.set_status_message("Status: Installing the Qwen engine. Progress is on the Log page.")
+        self.set_status_message(f"Status: Installing the {name} engine. Progress is on the Log page.")
         self.pending_install_entry = entry
-        self.qwen_install_thread = QwenInstallThread()
-        self.qwen_install_thread.finished_with.connect(self.on_qwen_install_finished)
-        self.qwen_install_thread.start()
+        self.engine_install_thread = EngineInstallThread(ENGINE_MODULES[backend])
+        self.engine_install_thread.finished_with.connect(
+            lambda error, name=name: self.on_engine_install_finished(name, error))
+        self.engine_install_thread.start()
 
-    def on_qwen_install_finished(self, error):
+    def on_engine_install_finished(self, name, error):
         if error:
-            self.set_status_message("Status: Qwen engine install failed. See the Log page.")
-            QMessageBox.warning(self, "Qwen Engine", f"The install failed:\n{error}")
+            self.set_status_message(f"Status: {name} engine install failed. See the Log page.")
+            QMessageBox.warning(self, f"{name} Engine", f"The install failed:\n{error}")
         else:
-            self.set_status_message("Status: Qwen engine installed. Loading the model...")
+            self.set_status_message(f"Status: {name} engine installed. Loading the model...")
             self.refresh_models_page()
             if self.pending_install_entry is not None:
                 self.load_entry(self.pending_install_entry)
@@ -3351,7 +3445,7 @@ class ChatterboxApp(QMainWindow):
         if preferred_index >= 0:
             self.language_combo.setCurrentIndex(preferred_index)
 
-        is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND)
+        is_multilingual = selected_entry.get("backend") in (BACKEND_MULTILINGUAL, QWEN_BACKEND, KOKORO_BACKEND)
         self.language_combo.setEnabled(is_multilingual)
         self.language_combo.setToolTip(
             "Language used by the multilingual Chatterbox backend."
@@ -3396,7 +3490,7 @@ class ChatterboxApp(QMainWindow):
     def release_model(self):
         """Free the current model (and stop a Qwen worker) before loading another."""
         old_model, self.model = self.model, None
-        if isinstance(old_model, qwen_engine.QwenModel):
+        if isinstance(old_model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)):
             old_model.close()
         del old_model
         gc.collect()
@@ -3784,7 +3878,7 @@ class ChatterboxApp(QMainWindow):
         if hasattr(self, 'audio_generator_thread') and self.audio_generator_thread.isRunning():
             self.audio_generator_thread.stop()  # Request stop
             self.audio_generator_thread.wait()  # Wait for it to finish
-        if isinstance(self.model, qwen_engine.QwenModel):
+        if isinstance(self.model, (qwen_engine.QwenModel, kokoro_engine.KokoroModel)):
             self.model.close()
         event.accept()
 

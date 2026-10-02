@@ -13,6 +13,8 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Voice cloning**, which can use a transcript of the clip for closer likeness.
 
   Qwen runs in its own environment, which the app offers to install. Its output can carry the same AI watermark as Chatterbox.
+- **Kokoro engine (optional).** 49 built-in voices in 7 languages from a 340 MB model, about 20× faster than Chatterbox. Pick a language, then a voice; the choice is remembered per language. Kokoro runs in its own environment, which the app offers to install, and can add the same AI watermark.
+- **GPU requirements on every model tile.** Each tile shows the GPU memory the model needs next to your GPU's, in green when it fits, amber when it runs but slower, and red when the GPU is too small.
 - **Faster Qwen documents.** Long text is generated in batches (up to 16 sections or about 5,000 characters per call), roughly 5× faster. Oversized batches are split automatically if the GPU runs out of memory.
 - **In-app voice recording.** A guided window with countdown, live level meter, too-quiet and clipping warnings, a 30-second limit, and phonetically rich read-aloud passages. Recordings save the passage as a transcript for Qwen cloning.
 - **Document narration:**
@@ -33,6 +35,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
 - **Voice page:** preview the current voice, return to the default voice, and use or preview saved recordings.
 
 ### Changed
+- **The shipped model list only holds models you can actually download.** The placeholder "Example custom…" entries and the "Legacy English compatibility" entry are gone; add an original-layout model with **+ Add repo…** if you need one. Each shipped model's download size is shown on its tile before you load it.
 - **New interface:**
   - Sidebar pages (Generate, Voice, Model, Advanced, Log).
   - A light/dark theme that follows Windows, with depth and texture.

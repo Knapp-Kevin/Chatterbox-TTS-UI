@@ -126,12 +126,13 @@ class TileArea(QScrollArea):
 class ModelTile(QFrame):
     """One model: name, engine and languages, badges, and a detail line."""
 
-    HEIGHT = 112
+    HEIGHT = 130
     clicked = Signal()
     menu_requested = Signal(QPoint)
 
     def __init__(self, title, subtitle, badges, detail, tooltip="", active=False,
-                 with_menu=False, parent=None):
+                 with_menu=False, needs=None, parent=None):
+        """needs: (kind, text, tooltip) for the hardware line; kind is good/tight/short."""
         super().__init__(parent)
         self.setObjectName("Tile")
         self.setProperty("active", active)
@@ -172,6 +173,12 @@ class ModelTile(QFrame):
         badge_row.addStretch(1)
         layout.addLayout(badge_row)
         layout.addStretch(1)
+        if needs:
+            kind, text, tip = needs
+            needs_label = _elided_label(text, "TileNeeds")
+            needs_label.setProperty("kind", kind)
+            needs_label.setToolTip(tip)
+            layout.addWidget(needs_label)
         layout.addWidget(_elided_label(detail, "Muted"))
 
     def mouseReleaseEvent(self, event):

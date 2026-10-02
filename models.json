@@ -16,42 +16,9 @@
       "notes": "Recommended default model. Uses the official multilingual V3 T3 weights by default.",
       "backend": "multilingual",
       "language_id": "en",
-      "multilingual_t3_model": "v3"
-    },
-    {
-      "repo_id": "ResembleAI/chatterbox",
-      "label": "Legacy English compatibility",
-      "enabled": true,
-      "experimental": true,
-      "test_text": "Hello. This is a quick test of the legacy English Chatterbox loader.",
-      "notes": "Uses the older English-focused loader path for compatibility testing.",
-      "backend": "legacy",
-      "language_id": "en"
-    },
-    {
-      "repo_id": "your-hf-name/your-chatterbox-model",
-      "label": "Example custom Spanish multilingual entry",
-      "enabled": false,
-      "experimental": true,
-      "test_text": "Hola. Reemplaza este repo_id por un modelo compatible que quieras probar.",
-      "test_texts": {
-        "es": "Hola. Reemplaza este repo_id por un modelo compatible que quieras probar.",
-        "en": "Hello. Replace this repo_id with a compatible model you want to try."
-      },
-      "notes": "Example only. Change repo_id, set enabled=true, and keep backend=multilingual for a compatible multilingual repo.",
-      "backend": "multilingual",
-      "language_id": "es",
-      "multilingual_t3_model": "v3"
-    },
-    {
-      "repo_id": "your-hf-name/your-legacy-chatterbox-model",
-      "label": "Example custom legacy entry",
-      "enabled": false,
-      "experimental": true,
-      "test_text": "Hello. Replace this repo id with a legacy-compatible model you want to try.",
-      "notes": "Example only. Set enabled=true and replace repo_id with a compatible legacy repo.",
-      "backend": "legacy",
-      "language_id": "en"
+      "multilingual_t3_model": "v3",
+      "license": "mit",
+      "download_bytes": 3208951924
     },
     {
       "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
@@ -62,7 +29,9 @@
       "notes": "Built-in speakers you can steer with plain-language style instructions.",
       "backend": "qwen3",
       "language_id": "en",
-      "qwen_variant": "custom_voice"
+      "qwen_variant": "custom_voice",
+      "license": "apache-2.0",
+      "download_bytes": 4520218951
     },
     {
       "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
@@ -73,7 +42,9 @@
       "notes": "Creates a new voice from a written description.",
       "backend": "qwen3",
       "language_id": "en",
-      "qwen_variant": "voice_design"
+      "qwen_variant": "voice_design",
+      "license": "apache-2.0",
+      "download_bytes": 4520163832
     },
     {
       "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -84,7 +55,21 @@
       "notes": "Clones the reference clip from the Voice page; a transcript of the clip improves likeness.",
       "backend": "qwen3",
       "language_id": "en",
-      "qwen_variant": "base"
+      "qwen_variant": "base",
+      "license": "apache-2.0",
+      "download_bytes": 4544229700
+    },
+    {
+      "repo_id": "hexgrad/Kokoro-82M",
+      "label": "Kokoro voices",
+      "enabled": true,
+      "experimental": false,
+      "test_text": "",
+      "notes": "Small and very fast, with dozens of built-in voices in 7 languages.",
+      "backend": "kokoro",
+      "language_id": "en",
+      "license": "apache-2.0",
+      "download_bytes": 355479286
     }
   ]
 }

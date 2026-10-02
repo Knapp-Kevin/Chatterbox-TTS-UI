@@ -3,7 +3,7 @@
 [![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 
-A Windows-first desktop app for local, private text-to-speech and voice cloning. It runs Resemble AI's open-source **Chatterbox TTS** and, optionally, Alibaba's **Qwen3-TTS** on your own GPU. Text, recordings and generated audio never leave your machine.
+A Windows-first desktop app for local, private text-to-speech and voice cloning. It runs Resemble AI's open-source **Chatterbox TTS** and, optionally, Alibaba's **Qwen3-TTS** and hexgrad's **Kokoro** on your own GPU. Text, recordings and generated audio never leave your machine.
 
 This fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI) adds a redesigned interface, in-app voice recording, document narration, a second TTS engine and in-app model management. See [CHANGELOG.md](CHANGELOG.md) for everything that changed.
 
@@ -45,7 +45,8 @@ Windows remains the primary maintained path.
 
 ## What's New in This Fork
 
-*   **Two engines, grouped by what they do.** Chatterbox (23 languages, fast voice cloning) plus optional Qwen3-TTS (preset voices with style instructions, voice design from a written description, and voice cloning).
+*   **Three engines, grouped by what they do.** Chatterbox (23 languages, voice cloning), plus optional Qwen3-TTS (preset voices with style instructions, voice design from a written description, and voice cloning) and Kokoro (dozens of preset voices, very fast).
+*   **Know before you download.** Every model tile shows its license and the GPU memory it needs, compared with your own GPU.
 *   **Record your own voice in the app.** A guided recording window: countdown, live level meter, too-quiet and clipping warnings, and a phonetically rich passage to read.
 *   **Narrate whole documents.** Open `.txt`, `.md` or `.docx`, preview a sample first, see a time estimate for every model, and follow progress with time remaining. Sections are split where a reader would pause, never mid-phrase or across paragraphs.
 *   **Manage models without editing files.** Browse compatible Hugging Face models by what they do, see each one's license at a glance, check a repo before downloading it, and add, edit or hide models from the Model page.
@@ -64,8 +65,9 @@ Windows remains the primary maintained path.
     *   **Variation** (temperature) and **Take number** (seed): "New take each time", or a fixed number to reproduce a take exactly.
     *   **Language**, based on what the selected model supports.
     *   Hover any control for an explanation. The original parameter name is shown in brackets.
-*   **Qwen controls** replace Expressiveness and Pacing when a Qwen model is active:
-    *   **Speaker** and **Style** for preset voices.
+*   **Qwen and Kokoro controls** replace Expressiveness and Pacing when one of their models is active:
+    *   **Speaker** and **Style** for Qwen preset voices.
+    *   **Voice** for Kokoro, listing the voices for the selected **Language**. Your choice is remembered per language.
     *   **Voice description** for voice design.
     *   **Clip transcript** for cloning.
     *   **Add AI watermark**, on by default.
@@ -85,7 +87,7 @@ Windows remains the primary maintained path.
 
 *   **Never across paragraphs or headings.** A short line without closing punctuation, like "Chapter Two", is read as a heading.
 *   **Overlong sentences** split at a clause break (; : — or a comma near the middle). A word boundary is used only when there's no punctuation.
-*   **Section size depends on the engine.** Chatterbox uses up to 280 characters per section. Qwen uses up to 600, so most paragraphs are generated in one piece.
+*   **Section size depends on the engine.** Chatterbox uses up to 280 characters per section, Kokoro 400, and Qwen 600, so most paragraphs are generated in one piece.
 *   **Pauses depend on the type of join.** Each section's own leading and trailing silence is trimmed, then a consistent gap is added: short inside a sentence, a little longer between sentences, your **Paragraph pause** between paragraphs, and a bit more after headings.
 
 ### Voice
@@ -103,11 +105,13 @@ Windows remains the primary maintained path.
 ### Model
 
 *   **Tabs by capability:** **Voice cloning**, **Preset voices** and **Voice design**.
-*   **Your models** as tiles: name, engine, languages and the typical time for 1,000 characters (learned from your own runs). Each tile has two badges:
+*   **Your models** as tiles: name, engine, languages and the typical time for 1,000 characters (learned from your own runs). Each tile shows:
     *   **Status:** Loaded, Ready (with its cached size), Download (with its size), or Needs engine.
     *   **License:** green for permissive licenses such as MIT or Apache 2.0, red for non-commercial, amber when unclear. Always read the model card before commercial use.
+    *   **GPU memory needed, compared with yours:** green ✓ when it fits, amber ! when it runs but slower (for example smaller Qwen batches), red ✗ when your GPU is too small. Hover for details, including whether the model can fall back to the CPU.
+*   **Your list is what you've chosen, not what's downloaded.** The app ships with the official Chatterbox model, the three Qwen3 models and Kokoro. Each downloads the first time you load it, and its tile shows the size first.
 *   **Click a tile to load it.** Right-click or **⋯** for **Edit…**, **Duplicate…**, **Hide from model switcher**, **Open on Hugging Face** and **Remove…**. Removing a model keeps its downloaded files.
-*   **Discover on Hugging Face** lists models this app can load for the current tab, most downloaded first, skipping ones you already have. Search by name or language. MLX, GGUF, ONNX, OpenVINO and Core ML conversions are filtered out. Click a tile to add it; nothing downloads until you load it.
+*   **Discover on Hugging Face** lists models this app can load for the current tab, most downloaded first, skipping ones you already have. Discover tiles show the same license and GPU lines. Search by name or language. MLX, GGUF, ONNX, OpenVINO and Core ML conversions are filtered out. Click a tile to add it; nothing downloads until you load it.
 *   **+ Add repo…**: enter a Hugging Face repo and click **Check**. Before anything downloads, it confirms the repo exists, which engine can load it, its license, its download size, and whether it's public, gated or private. Saving writes `models.json` for you.
 *   **Hugging Face access:** a token field with **Save** and **Test**. The token is stored only in `app_settings.json` on your computer, never in `models.json`. It's only needed for gated or private repos, or for higher download limits.
 *   **Fine-tuning:** repetition control, the unlikely-sound filter (min-p) and top-p. Remembered between sessions.
@@ -123,6 +127,15 @@ Windows remains the primary maintained path.
 *   Qwen needs different library versions than Chatterbox (`transformers` 4.57 vs 5.2). It runs in its own environment (`engines/qwen/.venv`) as a background worker. The first time you load a Qwen model, the app offers to install it.
 *   **Batched generation.** Several sections go to the GPU in one call: up to 16 sections or about 5,000 characters, whichever comes first. On an RTX 5070 Ti, an 18-section document took about 1 min 50 s, against about 10 minutes one section at a time. A batch that doesn't fit in GPU memory is split automatically.
 *   **Optional watermark.** Qwen output can get the same inaudible Perth AI watermark that Chatterbox applies.
+
+### Kokoro engine (optional)
+
+*   **Kokoro voices** (`hexgrad/Kokoro-82M`, Apache-2.0): 49 built-in voices in US and UK English, Spanish, French, Hindi, Italian, Brazilian Portuguese and Mandarin. The model is about 340 MB and needs about 2 GB of GPU memory. It also runs on a CPU.
+*   **Very fast.** On an RTX 5070 Ti, two paragraphs (25 s of speech) took about 2 s, roughly 20× faster than Chatterbox.
+*   **Preset voices only.** Kokoro doesn't clone voices or take style instructions. Pick a **Language**, then a **Voice**.
+*   Its text processing (misaki, spaCy, espeak-ng) runs in its own environment (`engines/kokoro/.venv`). The first time you load Kokoro, the app offers to install it.
+*   **Optional watermark,** as with Qwen.
+*   Community Kokoro repos with voices in other languages (for example German) are hidden from Discover, because Kokoro's text pipeline can't speak them here.
 
 ### Interface
 
@@ -147,6 +160,7 @@ Windows remains the primary maintained path.
 *   **Chatterbox multilingual** (`ResembleAI/chatterbox`, the default): `ar`, `da`, `de`, `el`, `en`, `es`, `fi`, `fr`, `he`, `hi`, `it`, `ja`, `ko`, `ms`, `nl`, `no`, `pl`, `pt`, `ru`, `sv`, `sw`, `tr`, `zh`.
 *   **Chatterbox original (single language):** the older layout. It speaks English with the official weights, or the language a community fine-tune was trained on (for example Norwegian or Indonesian).
 *   **Qwen3-TTS:** `en`, `zh`, `ja`, `ko`, `de`, `fr`, `ru`, `pt`, `es`, `it`.
+*   **Kokoro:** `en` (US and UK voices), `es`, `fr`, `hi`, `it`, `pt` (Brazilian), `zh`.
 *   **Bulgarian** isn't in the official Chatterbox language list.
 *   Use **Discover** on the Model page (search a language name) to look for community fine-tunes in other languages. Not every Hugging Face repo is loadable; **Check** tells you before anything downloads.
 </details>
@@ -158,9 +172,13 @@ Windows remains the primary maintained path.
 
 1.  **Python 3.11**, the supported target for the Windows launcher.
 2.  **`uv`**, a fast Python package manager: [https://github.com/astral-sh/uv#installation](https://github.com/astral-sh/uv#installation)
-3.  **NVIDIA GPU (recommended):** install the current NVIDIA driver. The installer reads the driver's CUDA version to pick a PyTorch build. Without a GPU, the app runs on CPU, more slowly.
+3.  **NVIDIA GPU (recommended):** install the current NVIDIA driver. The installer reads the driver's CUDA version to pick a PyTorch build. Without a GPU, the app runs on CPU, more slowly. GPU memory each model needs (also shown on its tile):
+    *   **Kokoro:** about 2 GB. Also usable on a CPU.
+    *   **Chatterbox:** at least 4 GB; 6 GB is comfortable. Peaks around 3.2 GB while generating. Works on a CPU, about 8× slower.
+    *   **Qwen3 0.6B models:** 4 GB minimum, 8 GB for full-speed batches.
+    *   **Qwen3 1.7B models:** 6 GB minimum, 12 GB for full-speed batches (long documents peak near 10 GB). Very slow on a CPU.
 4.  **FFmpeg (optional, recommended):** used for high-quality speed and pitch changes on the Advanced page. Playback doesn't need it. Install it, for example with `winget install Gyan.FFmpeg.Essentials`, or from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html), and make sure `ffmpeg.exe` is on your PATH.
-5.  **Disk space:** about 12 GB for the app environment (mostly PyTorch) and the default Chatterbox model. The optional Qwen engine needs up to about 8 GB more (less when `uv` can share PyTorch files), plus about 4.2 GB per Qwen model.
+5.  **Disk space:** about 12 GB for the app environment (mostly PyTorch) and the default Chatterbox model. The optional Qwen and Kokoro engines each need up to about 8 GB more for their environments (much less when `uv` can share PyTorch files), plus about 4.2 GB per Qwen model and 340 MB for Kokoro.
 6.  **Internet connection** for the first setup and model downloads. After that, generation runs offline with both engines.
 </details>
 
@@ -188,7 +206,7 @@ Windows remains the primary maintained path.
     *   Click **Generate Audio**. Results are saved to `chatterbox_outputs/` and listed under the player.
 4.  **Clone a voice:** on the **Voice** page, pick a microphone and click **Record...**, or **Browse for a file...**. The selected clip is used by the Voice cloning models.
     *   Chatterbox relies mostly on the first 6–10 seconds of a clip, so start speaking right away and keep the room quiet.
-5.  **Try Qwen (optional):** pick **Qwen3 preset voices**, **Qwen3 voice design** or **Qwen3 voice cloning** in the model switcher. The first time, the app offers to install the Qwen engine. Each model downloads the first time you use it.
+5.  **Try Qwen or Kokoro (optional):** pick **Qwen3 preset voices**, **Qwen3 voice design**, **Qwen3 voice cloning** or **Kokoro voices** in the model switcher, or click its tile on the Model page. The first time, the app offers to install that engine. Each model downloads the first time you use it.
 6.  **Add more models:** on the **Model** page, click a tile under **Discover**, or use **+ Add repo…** with **Check**.
 7.  **Hugging Face token (optional):** create a token with `Read` access at [Hugging Face Settings > Access Tokens](https://huggingface.co/settings/tokens). Paste it under **Hugging Face access** on the Model page, then click **Save** and **Test**. It's only needed for gated or private repos, or for higher download limits.
 </details>
@@ -228,7 +246,7 @@ If you prefer not to use the `run.bat` script or are on a different OS:
     python main.py
     ```
 
-The optional Qwen engine installs itself into `engines/qwen/.venv` from inside the app. Don't install `qwen-tts` into the main `.venv`: its `transformers` version conflicts with Chatterbox's.
+The optional Qwen and Kokoro engines install themselves into `engines/qwen/.venv` and `engines/kokoro/.venv` from inside the app. Don't install `qwen-tts` or `kokoro` into the main `.venv`: their `transformers` versions conflict with Chatterbox's.
 </details>
 
 ## Project Structure
@@ -243,7 +261,9 @@ The optional Qwen engine installs itself into `engines/qwen/.venv` from inside t
 *   `model_backends.py`: loads Chatterbox models.
 *   `model_registry.py`: engine definitions, capability groups, `models.json` saving, download status, license badges, the Hugging Face **Check**, and model search.
 *   `model_tiles.py`: the Model page tiles, tile grid and background Hugging Face search.
+*   `engine_worker.py`: shared code for engines with their own environment: installing it, running the worker process and adding the watermark.
 *   `qwen_engine.py` / `engines/qwen/qwen_worker.py`: the Qwen3-TTS engine. The worker runs inside `engines/qwen/.venv`.
+*   `kokoro_engine.py` / `engines/kokoro/kokoro_worker.py`: the Kokoro engine. The worker runs inside `engines/kokoro/.venv`.
 *   `documents.py`: document loading, paragraph-aware sectioning and batch planning.
 *   `audio_effects.py`: finishing touches, seam-aware joining, speed and pitch, and WAV/FLAC/MP3 export.
 *   `ui_theme.py` and `assets/`: the light/dark theme, painted surfaces, icons and logo.
@@ -252,7 +272,7 @@ The optional Qwen engine installs itself into `engines/qwen/.venv` from inside t
 *   `uv.toml`: pins `resemble-perth` to the locked commit, so current `uv` versions resolve the lock.
 *   `docs/screenshots/`: the screenshots in this README.
 *   Created at runtime and ignored by git:
-    *   `.venv/` and `engines/qwen/.venv/`: the Python environments.
+    *   `.venv/`, `engines/qwen/.venv/` and `engines/kokoro/.venv/`: the Python environments.
     *   `chatterbox_outputs/`: generated audio.
     *   `reference_recordings/`: your microphone recordings.
     *   `logs/`: installer and startup logs.
@@ -311,7 +331,7 @@ This project aims for both ease of use and predictable installs. Here's how PyTo
 *   **Users on CPU-only systems:** `install_torch.py` will install a CPU-only version of PyTorch.
 *   **Users with very new NVIDIA GPUs:** the installer may select a newer official CUDA wheel than the upstream `chatterbox-tts` package pins, because older wheels can lack kernels for the newer GPU architecture.
 *   **macOS / Linux users:** the Windows setup flow is currently the maintained path. Manual installation is safer than relying on `run.sh` for now.
-*   **Qwen engine:** installs its own PyTorch (CUDA 12.8 build) and `qwen-tts` into `engines/qwen/.venv`. The main environment is untouched.
+*   **Qwen and Kokoro engines:** each installs its own PyTorch (CUDA 12.8 build) and engine packages into `engines/<name>/.venv`. `uv` reuses cached PyTorch files, so the second engine installs quickly. The main environment is untouched.
 
 **Key takeaway:** the main lock file keeps the app dependencies stable, while the installer handles the Torch runtime separately so it can match the user's hardware.
 
@@ -326,6 +346,7 @@ Please open an issue or pull request if you want to help improve the app, instal
 *   **Resemble AI** for the open-source [Chatterbox TTS model](https://github.com/resemble-ai/chatterbox) (MIT).
 *   **AcTePuKc** for the original [Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI) this fork builds on (MIT).
 *   **The Qwen team (Alibaba)** for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Apache-2.0).
+*   **hexgrad** for [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) and its [misaki](https://github.com/hexgrad/misaki) text front end (Apache-2.0).
 *   The developers of PySide6, NLTK, PyTorch, librosa, FFmpeg, Rubber Band and `uv`.
 
 ## Contributors ✨

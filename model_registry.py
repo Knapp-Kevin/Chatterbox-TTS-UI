@@ -23,7 +23,7 @@ ENTRY_KEYS = (
 # ---------- licenses ----------
 
 # Licenses of the models the app ships with, for entries saved before licenses were recorded.
-KNOWN_LICENSES = {"ResembleAI/chatterbox": "mit", "Qwen/": "apache-2.0"}
+KNOWN_LICENSES = {"ResembleAI/chatterbox": "mit", "Qwen/": "apache-2.0", "hexgrad/": "apache-2.0"}
 PERMISSIVE_LICENSES = {
     "mit": "MIT", "apache-2.0": "Apache 2.0", "bsd-2-clause": "BSD", "bsd-3-clause": "BSD",
     "cc-by-4.0": "CC BY 4.0", "cc0-1.0": "CC0", "unlicense": "Unlicense", "mpl-2.0": "MPL 2.0",
@@ -91,6 +91,13 @@ ENGINES = {
                     "description, or cloning. Runs in its own environment (Apache-2.0).",
         languages_summary="10 languages",
     ),
+    "kokoro": Engine(
+        key="kokoro",
+        label="Kokoro",
+        description="A small, very fast model (82M parameters) with dozens of built-in voices in "
+                    "7 languages. Runs in its own environment (Apache-2.0).",
+        languages_summary="7 languages",
+    ),
 }
 
 QWEN_VARIANTS = {
@@ -131,13 +138,15 @@ def key_weight_file(entry):
         return "t3_cfg.safetensors"
     if entry.get("backend") == "qwen3":
         return "model.safetensors"
+    if entry.get("backend") == "kokoro":
+        return "config.json"  # plus a .pth, checked in is_downloaded
     return weights_file(entry)
 
 
 # What each model is for. The order is the order groups appear in the UI.
 CAPABILITIES = {
     "clone": ("Voice cloning", "Speak in the voice of a reference clip from the Voice page."),
-    "preset": ("Preset voices", "Pick a built-in speaker and steer it with a style."),
+    "preset": ("Preset voices", "Pick a built-in speaker; some models also take a style."),
     "design": ("Voice design", "Describe a voice in words and the model creates it."),
 }
 QWEN_CAPABILITY = {"base": "clone", "custom_voice": "preset", "voice_design": "design"}
@@ -146,6 +155,8 @@ QWEN_CAPABILITY = {"base": "clone", "custom_voice": "preset", "voice_design": "d
 def capability_for(entry):
     if entry.get("backend") == "qwen3":
         return QWEN_CAPABILITY.get(entry.get("qwen_variant"), "clone")
+    if entry.get("backend") == "kokoro":
+        return "preset"
     return "clone"  # Chatterbox clones, or uses its built-in voice with no clip
 
 
@@ -211,7 +222,40 @@ def is_downloaded(entry):
         cached = try_to_load_from_cache(entry["repo_id"], key_weight_file(entry))
     except Exception:
         return False
-    return isinstance(cached, str) and os.path.exists(cached)
+    if not (isinstance(cached, str) and os.path.exists(cached)):
+        return False
+    if entry.get("backend") == "kokoro":
+        return any(name.endswith(".pth") for name in os.listdir(os.path.dirname(cached)))
+    return True
+
+
+# ---------- hardware needs ----------
+
+@dataclass
+class HardwareNeeds:
+    min_gb: float      # GPU memory to run at all
+    good_gb: float     # GPU memory for full speed (e.g. full-size batches)
+    cpu_ok: bool       # usable without an NVIDIA GPU
+    note: str
+
+
+def _billions(repo_id):
+    """Parameter count from names like Qwen3-TTS-12Hz-1.7B or qwen3-tts-1-7b."""
+    match = re.search(r"(?<![\d.])(\d+)[._-](\d)b(?![a-z])", repo_id.lower())
+    return float(f"{match.group(1)}.{match.group(2)}") if match else None
+
+
+def hardware_needs(backend, repo_id=""):
+    """Rough GPU memory needs, measured on an RTX 5070 Ti where noted."""
+    if backend == "kokoro":
+        return HardwareNeeds(2, 2, True, "Small model; also quick on a CPU.")
+    if backend == "qwen3":
+        if (_billions(repo_id) or 1.7) < 1:
+            return HardwareNeeds(4, 8, False, "Smaller batches below 8 GB. Very slow on a CPU.")
+        return HardwareNeeds(6, 12, False, "Long documents peak near 10 GB at full batch size; "
+                                           "smaller GPUs use smaller batches. Very slow on a CPU.")
+    return HardwareNeeds(4, 6, True, "Peaks around 3.2 GB while generating. Works on a CPU, "
+                                     "about 8x slower.")
 
 
 def format_size(num_bytes):
@@ -266,6 +310,14 @@ def check_repo(repo_id, token=None):
         files = ENGINE_FILES["multilingual"] + ([WEIGHT_VERSIONS[best]] if best else ["t3_23lang.safetensors"])
     elif "t3_cfg.safetensors" in sizes:
         backend, files = "legacy", ENGINE_FILES["legacy"]
+    elif _is_kokoro_layout(sizes):
+        files = [name for name in sizes if name.endswith(".pth") and "/" not in name] + ["config.json"]
+        files += [name for name in sizes if name.startswith("voices/") and name.endswith(".pt")]
+        voices = sum(1 for name in files if name.startswith("voices/"))
+        download = sum(sizes.get(name, 0) for name in files)
+        access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
+        return RepoCheck(True, f"Found: Kokoro, {voices} voices · about {format_size(download)} to "
+                               f"download · {access}", "kokoro", (), download, gated, private, "", license_id)
     elif "config.json" in sizes and "model.safetensors" in sizes:
         result = _check_qwen_repo(repo_id, token, sizes, gated, private)
         result.license = license_id
@@ -276,7 +328,8 @@ def check_repo(repo_id, token=None):
         found = ", ".join(weights[:4]) + (" ..." if len(weights) > 4 else "") if weights else "no model files"
         return RepoCheck(False, f"Not a layout this app can load (found: {found}). Chatterbox "
                                 "multilingual repos have t3_mtl23ls_v3.safetensors; English ones "
-                                "have t3_cfg.safetensors.", gated=gated, private=private)
+                                "have t3_cfg.safetensors; Kokoro repos have a .pth, config.json "
+                                "and voices such as voices/af_heart.pt.", gated=gated, private=private)
     download = sum(sizes.get(name, 0) for name in files)
     engine = ENGINES[backend]
     access = "gated (token needed)" if gated else "private (token needed)" if private else "public"
@@ -285,6 +338,16 @@ def check_repo(repo_id, token=None):
         detail += f", weights {', '.join(v.upper() for v in versions)}"
     detail += f" · about {format_size(download)} to download · {access}"
     return RepoCheck(True, detail, backend, versions, download, gated, private, "", license_id)
+
+
+# Kokoro voice names start with a language letter; these are the ones its pipeline
+# can speak here (US/UK English, Spanish, French, Hindi, Italian, Portuguese, Mandarin).
+KOKORO_VOICE = re.compile(r"^voices/[abefhipz][fm]_\w+\.pt$")
+
+
+def _is_kokoro_layout(files):
+    return ("config.json" in files and any(name.endswith(".pth") and "/" not in name for name in files)
+            and any(KOKORO_VOICE.match(name) for name in files))
 
 
 def _check_qwen_repo(repo_id, token, sizes, gated, private):
@@ -352,6 +415,9 @@ def _classify(model):
         size = "0.6B " if "0.6b" in model.id.lower() else "1.7B " if "1.7b" in model.id.lower() else ""
         label = QWEN_VARIANTS.get(variant, "variant confirmed by Check").lower()
         return "qwen3", variant, f"Qwen3-TTS {size}· {label}"
+    if _is_kokoro_layout(files):
+        voices = sum(1 for name in files if name.startswith("voices/") and name.endswith(".pt"))
+        return "kokoro", "", f"Kokoro · {voices} voices"
     return None
 
 
@@ -368,6 +434,8 @@ def search_models(query="", engine="all", token=None, limit=40):
         listings.append(dict(filter="qwen3_tts", search=query or None))
         if query:
             listings.append(dict(search=query))
+    if engine in ("all", "kokoro"):
+        listings.append(dict(search=f"kokoro {query}".strip() if query else "kokoro"))
     seen, results = set(), []
     for kwargs in listings:
         try:
@@ -381,7 +449,8 @@ def search_models(query="", engine="all", token=None, limit=40):
                 if not classified:
                     continue
                 backend, variant, summary = classified
-                if engine == "chatterbox" and backend == "qwen3" or engine == "qwen3" and backend != "qwen3":
+                family = "chatterbox" if backend in ("multilingual", "legacy") else backend
+                if engine != "all" and family != engine:
                     continue
                 tags = {tag.lower() for tag in (model.tags or [])}
                 languages = tuple(sorted(tags & KNOWN_LANGUAGE_TAGS))

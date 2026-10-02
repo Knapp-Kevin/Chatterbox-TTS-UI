@@ -6,23 +6,18 @@ exposes the same interface as a loaded Chatterbox model (sr, device,
 generate(...)), so sectioning, previews, progress and finishing work unchanged.
 """
 
-import json
 import os
-import subprocess
-import sys
 import tempfile
-import threading
 
 import numpy as np
 import soundfile as sf
 import torch
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ENGINE_DIR = os.path.join(BASE_DIR, "engines", "qwen")
-PYTHON = os.path.join(ENGINE_DIR, ".venv", "Scripts" if os.name == "nt" else "bin",
-                      "python.exe" if os.name == "nt" else "python")
+import engine_worker
+
+ENGINE_DIR = engine_worker.engine_dir("qwen")
+PYTHON = engine_worker.venv_python("qwen")
 WORKER = os.path.join(ENGINE_DIR, "qwen_worker.py")
-TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 # Measured on an RTX 5070 Ti (1.7B, bf16): 12 sections took 181 s one at a time and 18 s as
 # one batch, with peak VRAM rising only ~0.2 GB per extra section. The worker halves a batch
 # and retries if the GPU runs out of memory.
@@ -55,80 +50,15 @@ def is_installed():
 
 def install(log=print):
     """Create engines/qwen/.venv with CUDA PyTorch and qwen-tts using uv."""
-    import shutil
-    uv = shutil.which("uv")
-    if not uv:
-        raise RuntimeError("uv was not found on PATH; it is needed to install the Qwen engine.")
-    os.makedirs(ENGINE_DIR, exist_ok=True)
-    venv = os.path.join(ENGINE_DIR, ".venv")
-    steps = [
-        [uv, "venv", venv, "--python", "3.11"],
-        [uv, "pip", "install", "--python", PYTHON, "torch==2.8.0", "torchaudio==2.8.0",
-         "--index-url", TORCH_INDEX],
-        [uv, "pip", "install", "--python", PYTHON, "qwen-tts"],
-    ]
-    for command in steps:
-        log("Running: " + " ".join(command[1:4]) + " ...")
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        for line in process.stdout:
-            log(line.rstrip())
-        if process.wait() != 0:
-            raise RuntimeError(f"Qwen engine install step failed: {' '.join(command[1:3])}")
+    engine_worker.install_env("qwen", [["qwen-tts"]], log)
 
 
-class QwenWorker:
-    """One long-lived worker process; requests are serialised with a lock."""
-
-    def __init__(self, log=print):
-        if not is_installed():
-            raise RuntimeError("The Qwen engine is not installed.")
-        self.log = log
-        self.lock = threading.Lock()
-        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-        self.process = subprocess.Popen(
-            [PYTHON, WORKER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1, env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        threading.Thread(target=self._pump_stderr, daemon=True).start()
-        ready = self._read_reply()
-        if not ready.get("ok"):
-            raise RuntimeError(ready.get("error", "Qwen worker failed to start."))
-        self.device = "cuda" if ready.get("cuda") else "cpu"
-
-    def _pump_stderr(self):
-        for line in self.process.stderr:
-            line = line.rstrip()
-            if line and "SoX could not be found" not in line and not line.startswith(("*", " - - -")):
-                self.log(f"[qwen] {line}")
-
-    def _read_reply(self):
-        line = self.process.stdout.readline()
-        if not line:
-            raise RuntimeError("The Qwen worker stopped unexpectedly. See the Log page.")
-        return json.loads(line)
-
-    def request(self, **payload):
-        with self.lock:
-            if self.process.poll() is not None:
-                raise RuntimeError("The Qwen worker is not running.")
-            self.process.stdin.write(json.dumps(payload) + "\n")
-            self.process.stdin.flush()
-            reply = self._read_reply()
-        if not reply.get("ok"):
-            raise RuntimeError(reply.get("error", "Qwen request failed."))
-        return reply
-
-    def close(self):
-        if self.process.poll() is None:
-            try:
-                self.request(cmd="shutdown")
-            except Exception:
-                pass
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+def QwenWorker(log=print):
+    if not is_installed():
+        raise RuntimeError("The Qwen engine is not installed.")
+    return engine_worker.WorkerProcess(
+        PYTHON, WORKER, "qwen", log,
+        skip=lambda line: "SoX could not be found" in line or line.startswith(("*", " - - -")))
 
 
 class QwenModel:
@@ -156,7 +86,7 @@ class QwenModel:
         self.instruct = ""
         self.ref_text = ""
         self.watermark = True
-        self._watermarker = None
+        self._watermark = engine_worker.PerthWatermark()
         self._temp_dir = tempfile.mkdtemp(prefix="qwen_tts_")
 
     def to(self, _device):
@@ -183,19 +113,9 @@ class QwenModel:
             wav, sr = sf.read(path, dtype="float32")
             self.sr = sr
             if self.watermark:
-                wav = self._apply_watermark(wav, sr)
+                wav = self._watermark.apply(wav, sr, "Qwen")
             results.append(torch.from_numpy(np.ascontiguousarray(wav)).unsqueeze(0))
         return results
-
-    def _apply_watermark(self, wav, sr):
-        try:
-            if self._watermarker is None:
-                import perth
-                self._watermarker = perth.PerthImplicitWatermarker()
-            return np.asarray(self._watermarker.apply_watermark(wav, sample_rate=sr), dtype=np.float32)
-        except Exception as exc:
-            print(f"Perth watermark could not be applied to Qwen audio: {exc}")
-            return wav
 
     def close(self):
         self.worker.close()

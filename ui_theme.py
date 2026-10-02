@@ -293,6 +293,10 @@ def _stylesheet(c):
         border: 2px solid {c['accent']};
     }}
     QLabel#TileTitle {{ font-weight: 700; }}
+    QLabel#TileNeeds {{ font-size: 9pt; font-weight: 600; color: {c['muted']}; }}
+    QLabel#TileNeeds[kind="good"] {{ color: {c['good_text']}; }}
+    QLabel#TileNeeds[kind="tight"] {{ color: {c['accent_pressed']}; }}
+    QLabel#TileNeeds[kind="short"] {{ color: {c['bad_text']}; }}
     QPushButton#TileMenu {{
         background: transparent; border: none; border-radius: 5px; padding: 0; font-size: 12pt; color: {c['muted']};
     }}
