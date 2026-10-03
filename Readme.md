@@ -22,6 +22,7 @@ Windows remains the primary maintained path.
 * [What's New in This Fork](#whats-new-in-this-fork)
 * [Features](#features)
 * [Local API](#local-api)
+* [Google Docs sign-in setup](#google-docs-sign-in-setup)
 * [Language Support](#language-support)
 * [Prerequisites](#prerequisites)
 * [Installation & Usage](#installation--usage)
@@ -79,7 +80,10 @@ Windows remains the primary maintained path.
 
 ### Documents and long text
 
-*   **Open...** loads `.txt` (UTF-8, UTF-16 or Windows-1252), `.md` (formatting stripped) or `.docx`. Text stays editable.
+*   **Open... → From this computer...** loads `.txt` (UTF-8, UTF-16 or Windows-1252), `.md` (formatting stripped) or `.docx`. Text stays editable.
+*   **Open... → From Google Docs...** opens a Google Doc, headings and all:
+    *   **Shared link:** paste a link to a doc shared as "Anyone with the link can view". No sign-in needed.
+    *   **Your Google Docs:** sign in with Google to search and open your own docs, including private ones. Access is read-only, your sign-in stays on this PC (`google_auth.json`), and **Sign out** revokes it. Signing in needs a one-time setup; see [Google Docs sign-in setup](#google-docs-sign-in-setup).
 *   **A live summary** under the text, for example "About 1 min 40 s · 4 sections · 553 characters". It updates as you edit, even during a render. Click the estimate to compare every model's time for the current text and switch to one.
 *   **Estimates are learned per model** from your own runs, so they get more accurate with use.
 *   **Preview** generates your selection, or the opening of the text: pick about **10 s, 20 s, 30 s or 1 min** next to it. **Keep this take** locks the preview's take number, so the full render matches.
@@ -229,6 +233,18 @@ The reply looks like `{"path": "...chapter1_....flac", "subtitles": "...srt", "s
 
 **Discovery:** `GET /v1/health` (what's loaded, ready or busy), `GET /v1/models`, `GET /v1/voices` (your library, plus the loaded model's built-in and sample voices). Errors come back as `{"error": {"message": ..., "type": ...}}`.
 
+## Google Docs sign-in setup
+
+Shared links work without this. To open your own (private) docs, Google requires each app to have its own OAuth client. You make one, once, for free:
+
+1.  Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project (any name).
+2.  **APIs & Services → Library → Google Drive API → Enable.**
+3.  **Google Auth Platform → Branding:** set an app name and your email. Under **Audience**, choose **External**, and add your own Google account under **Test users**.
+4.  **Google Auth Platform → Clients → Create client:** choose **Desktop app**, then **Download JSON**.
+5.  In the app: **Open... → From Google Docs... → Set up...**, choose the downloaded `client_secret_....json`, then **Sign in with Google**. Your browser opens Google's sign-in page; approve read-only access to your Drive.
+
+While the project is in **Testing**, Google ends sign-ins after 7 days, so you'd sign in again weekly. To stay signed in, set the publishing status to **In production** under **Audience**. Google will then show an "unverified app" warning when you sign in, which is expected for an app only you use.
+
 ## Language Support
 
 <details>
@@ -356,6 +372,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
 *   `subtitles.py`: subtitles from the generation timeline: caption splitting, pause snapping, SRT and WebVTT.
 *   `pronunciation.py`: the pronunciation dictionary: matching, respelling, import and export.
 *   `local_api.py`: the local HTTP API server (OpenAI-compatible and native endpoints).
+*   `google_docs.py`: Google Docs import: shared links, and Google sign-in (OAuth with PKCE) with the Drive API.
 *   `ui_theme.py` and `assets/`: the light/dark theme, painted surfaces, icons and logo.
 *   `models.json`: the model list, managed from the Model page.
 *   `requirements.in` / `requirements.lock.txt`: direct dependencies and the fully pinned lock (`uv pip compile`).
@@ -367,6 +384,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
     *   `reference_recordings/`: your microphone recordings.
     *   `voice_library/`: the voice library index (`voices.json`) and the clips it makes.
     *   `pronunciations.json`: your pronunciation dictionary.
+    *   `google_auth.json`: your Google OAuth client and sign-in, if you use Google Docs import.
     *   `logs/`: installer and startup logs.
     *   `app_settings.json`: window, delivery and finishing settings, learned speeds, and the Hugging Face token.
 </details>

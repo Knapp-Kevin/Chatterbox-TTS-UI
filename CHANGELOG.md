@@ -35,6 +35,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Discover on Hugging Face** lists more loadable models for each tab, searched in the background. Click one to add it.
 - **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
 - **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
+- **Google Docs import** (**Open... → From Google Docs...**). Paste a link to a doc shared with "anyone with the link", or sign in with Google (read-only) to search and open your own docs. Uses your own free Google Cloud OAuth client; setup steps are in the README.
 - **Keep this voice.** After previewing with a voice design model (Qwen, VoxCPM, OmniVoice), keep the voice you heard: it's saved to the voice library and locked in for the full render and later renders.
 - **Preview length.** Choose about 10 s, 20 s, 30 s or 1 min next to Preview (it was one section).
 - **Local API** (Advanced page, off by default). Other programs on this PC can generate speech over HTTP on `127.0.0.1`: an OpenAI-compatible `POST /v1/audio/speech` (for Open WebUI, SillyTavern and the `openai` package) and a native `POST /v1/speech` with any model, library voice and subtitles. Requests use the full pipeline, take turns with the app, load models on demand, and can require a token.

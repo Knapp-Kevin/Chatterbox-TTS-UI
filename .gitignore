@@ -77,3 +77,6 @@ voice_library/
 
 # Pronunciation dictionary (your word list)
 pronunciations.json
+
+# Google sign-in (OAuth client and tokens) for Google Docs import
+google_auth.json
