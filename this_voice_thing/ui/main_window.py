@@ -52,6 +52,7 @@ from this_voice_thing.ui.pages.engine_controls import EngineControls
 from this_voice_thing.ui.pages.estimates import Estimates
 from this_voice_thing.ui.pages.finishing import Finishing
 from this_voice_thing.ui.pages.generate import GeneratePage
+from this_voice_thing.ui.pages.generation import Generation
 from this_voice_thing.ui.pages.library import Library
 from this_voice_thing.ui.pages.model_loading import ModelLoading
 from this_voice_thing.ui.pages.model_settings import ModelSettings
@@ -62,7 +63,7 @@ from this_voice_thing.ui.pages.transcribe import TranscribePage
 from this_voice_thing.ui.pages.voice import VoicePage
 
 
-class ChatterboxApp(GeneratePage, Documents, Estimates, Finishing, EngineControls, Player,
+class ChatterboxApp(GeneratePage, Generation, Documents, Estimates, Finishing, EngineControls, Player,
                     VoicePage, Library, Recording, TranscribePage, ModelPage, Discover, ModelLoading, ModelSettings,
                     AdvancedPage, QMainWindow):
     log_message_signal = Signal(str)

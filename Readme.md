@@ -377,7 +377,7 @@ this-voice-thing/
 │  ├─ ui/
 │  │  ├─ main_window.py         the window: sidebar, page layout, settings (run as __main__)
 │  │  ├─ pages/                 one module per page, mixed into the window:
-│  │  │                         generate, documents, estimates, finishing, engine_controls, player,
+│  │  │                         generate, generation, documents, estimates, finishing, engine_controls, player,
 │  │  │                         voice, library, recording, transcribe, models, discover, model_loading,
 │  │  │                         model_settings, advanced
 │  │  ├─ dialogs/               recording, find/add models, voices and cast, pronunciation, Google Docs
