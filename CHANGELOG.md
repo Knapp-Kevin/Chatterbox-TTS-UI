@@ -35,6 +35,9 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Discover on Hugging Face** lists more loadable models for each tab, searched in the background. Click one to add it.
 - **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
 - **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
+- **Keep this voice.** After previewing with a voice design model (Qwen, VoxCPM, OmniVoice), keep the voice you heard: it's saved to the voice library and locked in for the full render and later renders.
+- **Preview length.** Choose about 10 s, 20 s, 30 s or 1 min next to Preview (it was one section).
+- **Local API** (Advanced page, off by default). Other programs on this PC can generate speech over HTTP on `127.0.0.1`: an OpenAI-compatible `POST /v1/audio/speech` (for Open WebUI, SillyTavern and the `openai` package) and a native `POST /v1/speech` with any model, library voice and subtitles. Requests use the full pipeline, take turns with the app, load models on demand, and can require a token.
 - **Pronunciation dictionary.** Respell names, acronyms and jargon (`Nguyen → Win`, `SQL → sequel`) for every model, with whole-word and match-case options. **Hear it** and **Try** let you test respellings, and word lists can be imported or exported. Subtitles keep the original spelling; the Generate page shows how many words were respelled.
 - **Subtitles.** Tick **Save subtitles** to get an `.srt` or `.vtt` file next to the audio. Captions are timed from the generated sections and snapped to the pauses in the speech, with no speech recognition needed. Speed changes and trimmed silence are accounted for, and conversation captions name their speaker.
 - **Advanced page:** speed and pitch changes (formant-preserving) and MP3 export, with a note that they can weaken the AI watermark.
@@ -57,6 +60,8 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
 - **Model settings** (repetition, min-p, top-p) are now remembered between sessions.
 
 ### Fixed
+- **Qwen voice design no longer changes voice between sections.** The first section is designed and the rest are cloned from it with Qwen3's cloning model (voice similarity between sections 0.76 → 0.91).
+- **Long voice names no longer widen the window**; the voice chip shortens them.
 - **Kokoro's voice picker no longer widens the window** (its long voice names set the minimum width).
 - **Windows installer:**
   - Batch files are now checked out with Windows line endings. Before, steps could run out of order and report success after a failure.

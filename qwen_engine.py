@@ -88,6 +88,16 @@ class QwenModel:
         self.watermark = True
         self._watermark = engine_worker.PerthWatermark()
         self._temp_dir = tempfile.mkdtemp(prefix="qwen_tts_")
+        self._count = 0
+        # Voice design invents a new voice on every call (and for every item in a batch),
+        # so a run designs the first section only and clones the rest from it with the
+        # matching Base model: Qwen's "design, then clone" workflow.
+        self.clone_repo = repo_id.replace("VoiceDesign", "Base") if "VoiceDesign" in repo_id else None
+        self.locked_anchor = None  # (clip, transcript) of a kept voice: every section clones it
+        self._anchor = None
+
+    def begin_run(self):
+        self._anchor = self.locked_anchor
 
     def to(self, _device):
         return self
@@ -99,23 +109,40 @@ class QwenModel:
                        cfg_weight=0.5, language_id=None, repetition_penalty=1.2, min_p=0.05,
                        top_p=1.0):
         """Generate several sections in one worker call; returns one (1, n) tensor each."""
-        out_paths = [os.path.join(self._temp_dir, f"section_{index}.wav") for index in range(len(texts))]
-        reply = self.worker.request(
-            cmd="generate", mode=self.mode, texts=list(texts),
-            language=LANGUAGE_NAMES.get(language_id or "", None),
-            speaker=self.speaker, instruct=self.instruct.strip(),
-            ref_audio=audio_prompt_path, ref_text=self.ref_text.strip() or None,
-            seed=int(torch.initial_seed() % 2**31), out_paths=out_paths,
-            temperature=float(temperature), top_p=float(top_p),
-            repetition_penalty=float(repetition_penalty))
+        sampling = dict(language=LANGUAGE_NAMES.get(language_id or "", None),
+                        seed=int(torch.initial_seed() % 2**31), temperature=float(temperature),
+                        top_p=float(top_p), repetition_penalty=float(repetition_penalty))
+        texts = list(texts)
+        if self.mode == "voice_design" and self.clone_repo:
+            paths = []
+            if self._anchor is None:
+                paths += self._request(texts[:1], "voice_design", sampling, instruct=self.instruct.strip())
+                self._anchor = (paths[0], texts[0])
+                texts = texts[1:]
+            if texts:
+                paths += self._request(texts, "base", sampling, clone_model_id=self.clone_repo,
+                                       ref_audio=self._anchor[0], ref_text=self._anchor[1])
+        else:
+            paths = self._request(texts, self.mode, sampling, speaker=self.speaker,
+                                  instruct=self.instruct.strip(), ref_audio=audio_prompt_path,
+                                  ref_text=self.ref_text.strip() or None)
         results = []
-        for path in reply["paths"]:
+        for path in paths:
             wav, sr = sf.read(path, dtype="float32")
             self.sr = sr
             if self.watermark:
                 wav = self._watermark.apply(wav, sr, "Qwen")
             results.append(torch.from_numpy(np.ascontiguousarray(wav)).unsqueeze(0))
         return results
+
+    def _request(self, texts, mode, sampling, **voice):
+        out_paths = []
+        for _text in texts:
+            self._count += 1  # unique names: a designed voice's first section is kept as its anchor
+            out_paths.append(os.path.join(self._temp_dir, f"section_{self._count}.wav"))
+        reply = self.worker.request(cmd="generate", mode=mode, texts=texts, out_paths=out_paths,
+                                    **sampling, **voice)
+        return reply["paths"]
 
     def close(self):
         self.worker.close()

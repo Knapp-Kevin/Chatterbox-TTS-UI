@@ -130,7 +130,7 @@ from PySide6.QtWidgets import (
     QMenu, QTabBar, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 # QStandardPaths was in your full file, good.
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime, QObject
 from PySide6.QtMultimedia import (
     QMediaPlayer, QAudioOutput, QAudioSource, QAudioFormat, QMediaDevices
 )
@@ -139,6 +139,8 @@ import ui_theme
 import audio_effects
 import subtitles
 import pronunciation
+import local_api
+import threading
 import documents
 import model_registry
 import qwen_engine
@@ -269,7 +271,22 @@ REFERENCE_RECORDINGS_DIRNAME = "reference_recordings"
 RECORDING_SAMPLE_RATE = 48000
 MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
-PREVIEW_MAX_SECTIONS = 2
+# Preview lengths offered next to Preview: (label, characters). Speech runs at roughly
+# 15 characters a second.
+PREVIEW_LENGTHS = (("~10 s", 150), ("~20 s", 300), ("~30 s", 450), ("~1 min", 900))
+DEFAULT_PREVIEW_CHARS = 300
+
+
+def preview_cut(lengths, budget):
+    """How many leading sections make up a preview of about budget characters (at least one)."""
+    if not budget:
+        return len(lengths)
+    total = 0
+    for count, length in enumerate(lengths, 1):
+        total += length
+        if total >= budget:
+            return count
+    return len(lengths)
 # Batched engines: a batch costs about longest_section_chars * rate * (1 + slope * sections).
 # Fitted on an RTX 5070 Ti (Qwen3 1.7B): 16 sections ~78 s, 2 sections ~28 s.
 BATCH_COST_SLOPE = 0.07
@@ -351,6 +368,26 @@ DEFAULT_MODELS_CONFIG = {
         },
     ]
 }
+
+
+class ElidingChip(QLabel):
+    """A label that shortens long text with an ellipsis instead of widening the window."""
+
+    MAX_WIDTH = 180
+    PADDING = 28  # the chip's left/right padding and border in the stylesheet
+
+    def __init__(self, text=""):
+        super().__init__()
+        self.setMaximumWidth(self.MAX_WIDTH)
+        self.setText(text)
+
+    def setText(self, text):
+        self.full_text = text
+        super().setText(self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight,
+                                                      self.MAX_WIDTH - self.PADDING))
+
+    def text(self):
+        return self.full_text
 
 
 class SliderWithValue(QWidget):
@@ -618,6 +655,7 @@ class AudioGeneratorThread(QThread):
         self.partial_info = None
         self.subtitle_path = None
         self.pronunciations = None  # set by the app; respells what is spoken
+        self.preview_chars = DEFAULT_PREVIEW_CHARS  # set by the app; None previews all the text
         self.model = model
         self.original_text = text
         self.audio_prompt_path = audio_prompt_path
@@ -676,7 +714,7 @@ class AudioGeneratorThread(QThread):
             planner = getattr(self.model, "plan_sections", None)
             planned = planner(self.original_text) if planner else documents.plan_sections(self.original_text, max_chars)
             if self.preview:
-                planned = planned[:PREVIEW_MAX_SECTIONS]
+                planned = planned[:preview_cut([len(section.text) for section in planned], self.preview_chars)]
             final_chunks = [section.text for section in planned]
             self.section_boundaries = [section.boundary for section in planned]
             # What the model is given: the pronunciation dictionary applied. final_chunks
@@ -1619,6 +1657,89 @@ class PronunciationDialog(QDialog):
             pronunciation.export_rules(path, self.rules())
 
 
+class ApiBridge(QObject):
+    """The local API's backend. HTTP requests arrive on server threads; anything that
+    touches the app's state runs on the UI thread, and generation itself runs on
+    the request's thread through the same generator the Generate button uses."""
+
+    run_requested = Signal(object)
+    OPENAI_MODEL_NAMES = {"", "tts-1", "tts-1-hd", "gpt-4o-mini-tts", "default"}
+    LOAD_TIMEOUT = 900
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.job_lock = threading.Lock()  # one API generation at a time
+        self.run_requested.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    def _run(self, call):
+        function, box, done = call
+        try:
+            box["value"] = function()
+        except Exception as exc:
+            box["error"] = exc
+        done.set()
+
+    def on_ui(self, function, timeout=30):
+        box, done = {}, threading.Event()
+        self.run_requested.emit((function, box, done))
+        if not done.wait(timeout):
+            raise local_api.ApiError(503, "The app didn't respond in time.", "server_error")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def health(self):
+        return self.on_ui(self.app.api_health)
+
+    def models(self):
+        return self.on_ui(self.app.api_models)
+
+    def voices(self):
+        return self.on_ui(self.app.api_voices)
+
+    def synthesize(self, request):
+        if not self.job_lock.acquire(timeout=self.LOAD_TIMEOUT):
+            raise local_api.ApiError(503, "Another API request is still running.", "server_error")
+        try:
+            deadline = time.monotonic() + self.LOAD_TIMEOUT
+            while True:
+                job = self.on_ui(lambda: self.app.api_begin(request))
+                if not job.get("loading"):
+                    break
+                if time.monotonic() > deadline:
+                    raise local_api.ApiError(504, "The model took too long to load.", "server_error")
+                time.sleep(0.5)  # a model is loading for this request
+            try:
+                return self._generate(job)
+            finally:
+                self.on_ui(self.app.api_end)
+        finally:
+            self.job_lock.release()
+
+    def _generate(self, job):
+        outcome = {}
+        thread = AudioGeneratorThread(**job["generator"])
+        thread.pronunciations = job["pronunciations"]
+        thread.generation_complete.connect(
+            lambda path, sr: outcome.update(path=path, sr=sr), Qt.ConnectionType.DirectConnection)
+        thread.error_occurred.connect(
+            lambda message: outcome.update(error=message), Qt.ConnectionType.DirectConnection)
+        started = time.monotonic()
+        thread.run()  # in this request's thread, not a new one
+        if "path" not in outcome:
+            raise local_api.ApiError(500, outcome.get("error", "Generation failed."), "server_error")
+        import soundfile
+        info = soundfile.info(outcome["path"])
+        return {
+            "path": outcome["path"], "subtitles": thread.subtitle_path,
+            "seconds": round(info.duration, 2), "sample_rate": outcome["sr"],
+            "generation_seconds": round(time.monotonic() - started, 2),
+            "model": job["model_label"], "voice": job["voice_label"],
+            "mime": job["mime"], "temporary": job["temporary"], "seed": thread.actual_seed_used,
+        }
+
+
 class SpeakThread(QThread):
     """Speak a short text with the loaded model (for trying respellings)."""
 
@@ -1772,6 +1893,12 @@ class ChatterboxApp(QMainWindow):
             self.script_dir, REFERENCE_RECORDINGS_DIRNAME)
         self.voice_library = voice_library.VoiceLibrary(self.script_dir, self.recordings_directory)
         self.pronunciations = pronunciation.Dictionary(os.path.join(self.script_dir, pronunciation.FILENAME))
+        self.api_settings = dict({"enabled": False, "port": local_api.DEFAULT_PORT, "token": ""},
+                                 **self.app_settings.get("api", {}))
+        self.api_server = None
+        self.api_bridge = ApiBridge(self)
+        self.api_busy = False
+        self.api_loading_entry = None
         self.active_voice_id = None
         self.pending_voice = None
         self.media_devices = QMediaDevices(self)
@@ -1836,6 +1963,7 @@ class ChatterboxApp(QMainWindow):
         else:
             self.set_status_message("Status: Chatterbox library not found.")
             self.generate_button.setEnabled(False)
+        QTimer.singleShot(0, self.restart_api_server)
 
     PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_ADVANCED, PAGE_LOG = range(5)
 
@@ -1927,7 +2055,7 @@ class ChatterboxApp(QMainWindow):
         voice_row = QHBoxLayout()
         voice_row.setContentsMargins(ui_theme.SHADOW, 0, ui_theme.SHADOW, 2)
         voice_row.addWidget(QLabel("Voice"))
-        self.voice_chip = QLabel("Default voice")
+        self.voice_chip = ElidingChip("Default voice")
         self.voice_chip.setObjectName("VoiceChip")
         self.voice_chip.setTextFormat(Qt.TextFormat.PlainText)
         voice_row.addWidget(self.voice_chip)
@@ -1997,6 +2125,13 @@ class ChatterboxApp(QMainWindow):
         self.keep_take_button.clicked.connect(self.keep_preview_take)
         self.keep_take_button.setVisible(False)
         text_status_row.addWidget(self.keep_take_button)
+        self.keep_voice_button = self._link(QPushButton("Keep this voice"))
+        self.keep_voice_button.setToolTip(
+            "Save the designed voice you just heard to the voice library and lock it in, so the full "
+            "render (and later ones) use exactly this voice instead of designing a new one.")
+        self.keep_voice_button.clicked.connect(self.keep_designed_voice)
+        self.keep_voice_button.setVisible(False)
+        text_status_row.addWidget(self.keep_voice_button)
         status_row_widget = QWidget()
         status_row_widget.setLayout(text_status_row)
         text_status_row.setContentsMargins(0, 0, 0, 0)
@@ -2004,26 +2139,38 @@ class ChatterboxApp(QMainWindow):
         text_card_layout.addWidget(status_row_widget)
 
         generate_actions_layout = QHBoxLayout()
-        self.open_document_button = QPushButton("Open document...")
+        self.open_document_button = QPushButton("Open...")
         self.open_document_button.setToolTip("Load a .txt, .md or .docx file to read aloud.")
         self.open_document_button.clicked.connect(self.open_document)
         generate_actions_layout.addWidget(self.open_document_button)
-        self.use_preset_button = QPushButton("Sample text")
+        self.use_preset_button = QPushButton("Sample")
         self.use_preset_button.setToolTip("Fill in a short test sentence for the selected language.")
         self.use_preset_button.clicked.connect(self.apply_selected_text_preset)
         generate_actions_layout.addWidget(self.use_preset_button)
         generate_actions_layout.addStretch()
+        self.preview_length_combo = QComboBox()
+        for label, characters in PREVIEW_LENGTHS:
+            self.preview_length_combo.addItem(label, characters)
+        saved_length = self.preview_length_combo.findData(self.app_settings.get("preview_chars", DEFAULT_PREVIEW_CHARS))
+        self.preview_length_combo.setCurrentIndex(max(0, saved_length))
+        self.preview_length_combo.setToolTip(
+            "How much of the text Preview reads, from the start (whole sections, so it can run a "
+            "little longer). Select text to preview exactly that instead.")
+        self.preview_length_combo.currentIndexChanged.connect(
+            lambda _index: self.app_settings.update(preview_chars=self.preview_length_combo.currentData()))
+        self.preview_length_combo.setFixedWidth(84)
+        generate_actions_layout.addWidget(self.preview_length_combo)
         self.preview_button = QPushButton("Preview")
         self.preview_button.setToolTip(
             "Generate a short sample with the current settings before rendering everything: "
-            "the selected text, or the opening section if nothing is selected.")
+            "the selected text, or the opening of the text (length chosen on the left).")
         self.preview_button.clicked.connect(lambda: self.start_generation(preview=True))
         self.preview_button.setEnabled(False)
         generate_actions_layout.addWidget(self.preview_button)
         self.generate_button = self._accent(QPushButton("Generate Audio"))
         self.generate_button.clicked.connect(self.handle_generate_stop_toggle)
         self.generate_button.setEnabled(False)
-        self.generate_button.setMinimumWidth(160)
+        self.generate_button.setMinimumWidth(140)
         generate_actions_layout.addWidget(self.generate_button)
         text_card_layout.addLayout(generate_actions_layout)
         generate_layout.addWidget(text_card, 3)
@@ -2535,6 +2682,43 @@ class ChatterboxApp(QMainWindow):
         advanced_layout.addWidget(pronunciation_card)
         self.update_pronunciation_summary()
 
+        api_card, api_layout = self._make_card("Local API")
+        api_top = QHBoxLayout()
+        self.api_checkbox = QCheckBox("Let other programs on this PC use the app")
+        self.api_checkbox.setToolTip(
+            "Starts a small web server on 127.0.0.1 (this computer only). Scripts and tools that speak "
+            "the OpenAI speech API, such as Open WebUI or SillyTavern, can then use your models and voices.")
+        self.api_checkbox.setChecked(bool(self.api_settings.get("enabled")))
+        self.api_checkbox.toggled.connect(self.on_api_toggled)
+        api_top.addWidget(self.api_checkbox)
+        api_top.addStretch(1)
+        self.api_status_label = QLabel()
+        self.api_status_label.setObjectName("Muted")
+        self.api_status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        api_top.addWidget(self.api_status_label)
+        api_layout.addLayout(api_top)
+        api_row = QHBoxLayout()
+        api_row.addWidget(QLabel("Port"))
+        self.api_port_spin = QSpinBox()
+        self.api_port_spin.setRange(1024, 65535)
+        self.api_port_spin.setValue(int(self.api_settings.get("port") or local_api.DEFAULT_PORT))
+        self.api_port_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.api_port_spin.setFixedWidth(70)
+        self.api_port_spin.editingFinished.connect(self.on_api_settings_changed)
+        api_row.addWidget(self.api_port_spin)
+        api_row.addWidget(QLabel("Token"))
+        self.api_token_input = QLineEdit(str(self.api_settings.get("token") or ""))
+        self.api_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_token_input.setPlaceholderText("Optional: required as a Bearer token")
+        self.api_token_input.editingFinished.connect(self.on_api_settings_changed)
+        api_row.addWidget(self.api_token_input, 1)
+        copy_example = self._link(QPushButton("Copy example"))
+        copy_example.setToolTip("Copy a curl command that saves speech to speech.mp3.")
+        copy_example.clicked.connect(self.copy_api_example)
+        api_row.addWidget(copy_example)
+        api_layout.addLayout(api_row)
+        advanced_layout.addWidget(api_card)
+
         export_card, export_layout = self._make_card("Export")
         self.mp3_checkbox = QCheckBox("Save results as MP3")
         self.mp3_checkbox.setToolTip(
@@ -2751,20 +2935,27 @@ class ChatterboxApp(QMainWindow):
             self.on_generation_thread_finished()
 
     def preview_text(self):
+        """(text, character budget): a selection is previewed whole; otherwise the text's
+        opening sections, up to the length picked next to Preview."""
         selected = self.text_input.textCursor().selectedText().replace("\u2029", "\n").strip()
         if selected:
-            return selected
-        entry = self.loaded_entry() or self.get_selected_model_entry()
-        sections = self.split_text(self.text_input.toPlainText(), entry)
-        return sections[0] if sections else ""
+            return selected, None
+        return self.text_input.toPlainText().strip(), self.preview_length_combo.currentData()
 
     def start_generation(self, preview=False):
         if self.is_generating:
             return
+        if self.api_busy:
+            self.set_status_message("Status: Busy with a request from the local API; try again in a moment.")
+            return
         if self.model is None:
             QMessageBox.warning(self, "Model Not Loaded", "Please load the model first.")
             return
-        text = self.preview_text() if preview else self.text_input.toPlainText().strip()
+        preview_budget = None
+        if preview:
+            text, preview_budget = self.preview_text()
+        else:
+            text = self.text_input.toPlainText().strip()
         if not text:
             QMessageBox.warning(self, "Input Error", "Please enter some text to synthesize.")
             return
@@ -2779,7 +2970,7 @@ class ChatterboxApp(QMainWindow):
         plan_entry = self.loaded_entry() or self.get_selected_model_entry()
         lengths = self.section_lengths(text, plan_entry)
         if preview:
-            lengths = lengths[:PREVIEW_MAX_SECTIONS]
+            lengths = lengths[:preview_cut(lengths, preview_budget)]
         self.generation_plan = self.batch_plan(plan_entry, lengths)
         self.generation_estimate = sum(cost for _f, _l, cost in self.generation_plan)
         self.progress_range = None
@@ -2787,6 +2978,7 @@ class ChatterboxApp(QMainWindow):
         self.progress_done_time = 0.0
         self.generation_started_at = time.monotonic()
         self.keep_take_button.setVisible(False)
+        self.keep_voice_button.setVisible(False)
         self.generate_button.setText("Stop")
         self.generate_button.setEnabled(True)
         self.preview_button.setEnabled(False)
@@ -2817,12 +3009,48 @@ class ChatterboxApp(QMainWindow):
             preview=preview,
         )
         self.audio_generator_thread.pronunciations = self.pronunciations
+        self.audio_generator_thread.preview_chars = preview_budget
         self.audio_generator_thread.generation_complete.connect(self.on_generation_complete)
         self.audio_generator_thread.error_occurred.connect(self.on_generation_error)
         self.audio_generator_thread.chunk_generated.connect(self.on_chunk_generated_progress)
         self.audio_generator_thread.section_timed.connect(self.on_section_timed)
         self.audio_generator_thread.finished.connect(self.on_generation_thread_finished)
         self.audio_generator_thread.start()
+
+    def keep_designed_voice(self):
+        """Save the voice a design model just made (the preview's first section) to the
+        library, and lock it in for every render."""
+        model = self.active_qwen_model()
+        anchor = getattr(model, "_anchor", None)
+        if model is None or model.mode != "voice_design" or not anchor or not os.path.exists(anchor[0]):
+            self.keep_voice_button.setVisible(False)
+            return
+        entry = self.loaded_entry()
+        description = self.qwen_instruct_input.text().strip()
+        voice = voice_library.Voice(
+            name="Designed voice", kind="design", backend=entry["backend"], repo_id=entry["repo_id"],
+            mode=model_registry.entry_mode(entry) if entry["backend"] in DUAL_MODE_BACKENDS else "",
+            description=description, language=self.language_combo.currentData() or "")
+        dialog = VoiceDetailsDialog("Keep this voice", voice, self.voice_library, parent=self)
+        if not dialog_accepted(dialog.exec()):
+            return
+        dialog.apply()
+        path = self.voice_library.new_clip_path(voice.name)
+        import soundfile
+        wav, sr = soundfile.read(anchor[0], dtype="float32")
+        soundfile.write(path, np.clip(wav, -1.0, 1.0), sr, subtype="PCM_16")
+        voice_library.write_transcript(path, anchor[1])
+        voice.clip = self.voice_library.to_stored(path)
+        self.voice_library.add(voice)
+        model.locked_anchor = (path, anchor[1])
+        self.locked_description = description
+        self.locked_voice_name = voice.name
+        self.active_voice_id = voice.id
+        self.keep_voice_button.setVisible(False)
+        self.refresh_voice_chip()
+        self.render_voice_tiles()
+        self.set_status_message(f"Status: Kept {voice.name}. Every section now uses this voice; "
+                                "it's in the voice library too.")
 
     def keep_preview_take(self):
         if self.last_preview_seed:
@@ -3170,8 +3398,12 @@ class ChatterboxApp(QMainWindow):
             name = self.qwen_speaker_combo.currentText().split(" (")[0]
             text = f"Preset: {name or 'speaker'}"
             tip = "A built-in voice. Reference clips aren't used by this model."
+        elif qwen is not None and qwen.mode == "voice_design" and getattr(qwen, "locked_anchor", None):
+            name = getattr(self, "locked_voice_name", None) or "kept voice"
+            text, tip = f"Designed: {name}", ("Locked to a voice you kept: every section uses it. Change "
+                                              "the description to design a new voice.")
         elif qwen is not None and qwen.mode == "voice_design":
-            text, tip = "Designed voice", "Described in the Delivery card below."
+            text, tip = "Designed voice", "Described in the Delivery card below. Preview, then Keep this voice to lock it."
         elif reference:
             saved = self.voice_library.find_clip(reference)
             text, tip = (saved.name if saved else os.path.basename(reference)), reference
@@ -3222,6 +3454,10 @@ class ChatterboxApp(QMainWindow):
             return None
         qwen.instruct = instruct
         qwen.ref_text = self.qwen_transcript_input.text().strip() if qwen.mode == "base" else ""
+        if getattr(qwen, "locked_anchor", None) and instruct != getattr(self, "locked_description", instruct):
+            qwen.locked_anchor = None  # the description changed: design a new voice
+            self.locked_voice_name = None
+            self.set_status_message("Status: Description changed, so a new voice will be designed.")
         if hasattr(qwen, "begin_run"):
             qwen.begin_run()
         key = "description" if qwen.mode == "voice_design" else "style"
@@ -3233,6 +3469,250 @@ class ChatterboxApp(QMainWindow):
             settings["speaker"] = qwen.speaker
             self.app_settings["qwen"] = settings
         return None
+
+    # --- Local API ---
+
+    def save_api_settings(self):
+        self.api_settings.update(enabled=self.api_checkbox.isChecked(), port=self.api_port_spin.value(),
+                                 token=self.api_token_input.text().strip())
+        self.app_settings["api"] = dict(self.api_settings)
+        self.save_app_settings()
+
+    def on_api_toggled(self, checked):
+        self.save_api_settings()
+        self.restart_api_server()
+
+    def on_api_settings_changed(self):
+        changed = (self.api_port_spin.value() != self.api_settings.get("port")
+                   or self.api_token_input.text().strip() != self.api_settings.get("token"))
+        self.save_api_settings()
+        if changed and self.api_checkbox.isChecked():
+            self.restart_api_server()
+
+    def restart_api_server(self):
+        if self.api_server is not None:
+            self.api_server.stop()
+            self.api_server = None
+        if self.api_checkbox.isChecked():
+            server = local_api.LocalApiServer(self.api_bridge, self.api_port_spin.value(),
+                                              self.api_token_input.text(), log=print)
+            try:
+                server.start()
+            except OSError as exc:
+                self.api_status_label.setText(f"Port {self.api_port_spin.value()} is in use")
+                self.api_status_label.setToolTip(str(exc))
+                print(f"Local API could not start: {exc}")
+                return
+            self.api_server = server
+            self.api_status_label.setText(f"On: {server.url}")
+            self.api_status_label.setToolTip("Only programs on this computer can connect.")
+        else:
+            self.api_status_label.setText("Off")
+            self.api_status_label.setToolTip("")
+
+    def copy_api_example(self):
+        url = f"http://127.0.0.1:{self.api_port_spin.value()}"
+        token = self.api_token_input.text().strip()
+        auth = f' -H "Authorization: Bearer {token}"' if token else ""
+        command = (f'curl {url}/v1/audio/speech -H "Content-Type: application/json"{auth} '
+                   '-d "{\\"input\\": \\"Hello from my own computer.\\", \\"response_format\\": \\"mp3\\"}" '
+                   "-o speech.mp3")
+        QApplication.clipboard().setText(command)
+        self.set_status_message("Status: Copied an example curl command.")
+
+    def api_health(self):
+        entry = self.loaded_entry() if self.model is not None else None
+        return {
+            "status": "busy" if self.model_busy() else "ready" if self.model is not None else "no model loaded",
+            "model": entry["label"] if entry else None,
+            "device": self.device_used if self.model is not None else None,
+            "voice": self.voice_chip.text(),
+            "endpoints": ["GET /v1/health", "GET /v1/models", "GET /v1/voices",
+                          "POST /v1/audio/speech (OpenAI-compatible)", "POST /v1/speech"],
+        }
+
+    def api_models(self):
+        rows = []
+        for entry in self.model_entries:
+            rows.append({
+                "id": entry["label"], "object": "model", "repo_id": entry["repo_id"],
+                "engine": model_registry.engine_label(entry),
+                "capability": model_registry.capability_for(entry),
+                "loaded": self.is_active_entry(entry), "downloaded": model_registry.is_downloaded(entry),
+                "installed": self.engine_installed(entry),
+            })
+        return rows
+
+    def api_voices(self):
+        rows = [{"id": voice.id, "name": voice.name, "kind": voice.kind, "tags": voice.tags,
+                 "engine": voice.backend or "any cloning model", "has_clip": voice.has_clip}
+                for voice in self.voice_library.voices]
+        model = self.active_qwen_model()
+        for speaker in getattr(model, "speakers", []) or []:
+            rows.append({"id": speaker, "name": speaker, "kind": "built-in",
+                         "engine": getattr(model, "backend", "")})
+        for name in (getattr(model, "sample_paths", None) or {}):
+            rows.append({"id": name.split(" (")[0], "name": name, "kind": "sample", "engine": "vibevoice"})
+        return rows
+
+    def api_find_entry(self, name):
+        name = str(name or "").strip()
+        if name.lower() in ApiBridge.OPENAI_MODEL_NAMES:
+            return None
+        for entry in self.model_entries:
+            if name.lower() in (entry["label"].lower(), entry["repo_id"].lower()):
+                return entry
+        raise local_api.ApiError(404, f"No model called {name!r}. See GET /v1/models.", "not_found")
+
+    def api_begin(self, request):
+        """Resolve a request's model and voice, and claim the GPU. Runs on the UI thread.
+        Returns {"loading": True} while a model it asked for is still loading."""
+        if getattr(self, "model_is_loading", False):
+            if self.api_loading_entry is not None:
+                return {"loading": True}
+            raise local_api.ApiError(503, "A model is loading in the app; try again shortly.", "server_error")
+        self.api_loading_entry = None
+        if self.is_generating or self.api_busy:
+            raise local_api.ApiError(503, "The app is generating right now; try again shortly.", "server_error")
+        entry = self.api_find_entry(request.get("model"))
+        voice = self.api_find_voice(request.get("voice"))
+        if voice is not None and voice.kind != "clip" and entry is None:
+            entry = self.entry_for_voice(voice)  # a preset or designed voice brings its model
+        if entry is not None and not self.is_active_entry(entry):
+            if not self.engine_installed(entry):
+                raise local_api.ApiError(409, f"{entry['label']} needs its engine installed; load it once in "
+                                              "the app first.")
+            self.api_loading_entry = entry
+            self.set_status_message(f"Status: Loading {entry['label']} for an API request...")
+            self.load_entry(entry)
+            return {"loading": True}
+        if self.model is None:
+            raise local_api.ApiError(409, "No model is loaded in the app.")
+        model = self.model
+        text = request["text"]
+        reference = self.ref_audio_path_label.toolTip() or None
+        voice_label = self.voice_chip.text()
+        worker = self.active_qwen_model()
+        if worker is not None:
+            problem = self.prepare_qwen_generation()  # the app's current voice settings first...
+            if problem and voice is None and not request.get("style"):
+                raise local_api.ApiError(400, problem)
+        if voice is not None:  # ...then the requested voice on top
+            reference, voice_label = self.api_apply_voice(voice, reference)
+        elif request.get("voice") and worker is not None:
+            voice_label = self.api_apply_speaker(str(request["voice"]))
+        elif request.get("voice") and str(request["voice"]).lower() not in self.OPENAI_VOICES | {"default"}:
+            raise local_api.ApiError(404, f"No voice called {request['voice']!r}. See GET /v1/voices.", "not_found")
+        style = str(request.get("style") or "").strip()
+        if style and worker is not None and worker.mode in ("custom_voice", "voice_design") or (
+                style and isinstance(worker, voxcpm_engine.VoxCPMModel)):
+            worker.instruct = style
+        if isinstance(worker, vibevoice_engine.VibeVoiceModel):
+            speakers = documents.script_speakers(documents.parse_script(text))
+            if len(speakers) > vibevoice_engine.MAX_SPEAKERS:
+                raise local_api.ApiError(400, f"VibeVoice handles up to {vibevoice_engine.MAX_SPEAKERS} speakers.")
+            worker.cast = self.current_cast(speakers)
+        if worker is not None and hasattr(worker, "begin_run"):
+            worker.begin_run()
+        if worker is not None and worker.mode == "voice_design" and not worker.instruct.strip():
+            raise local_api.ApiError(400, "This is a voice design model: give a designed voice or a \"style\" "
+                                          "(the voice description).")
+        if worker is not None and worker.mode == "base" and not reference:
+            raise local_api.ApiError(400, "This cloning model needs a voice: name a clip voice, or pick one in the app.")
+        finishing = self.current_finishing_settings()
+        output_format = str(request.get("format") or "WAV").upper()
+        if output_format not in audio_effects.OUTPUT_FORMATS:
+            raise local_api.ApiError(400, f"format must be one of {', '.join(audio_effects.OUTPUT_FORMATS)}.")
+        finishing.output_format = output_format
+        if request.get("speed") not in (None, ""):
+            try:
+                finishing.speed = float(np.clip(float(request["speed"]), *audio_effects.SPEED_RANGE))
+            except (TypeError, ValueError):
+                raise local_api.ApiError(400, "speed must be a number.")
+        subtitle_format = str(request.get("subtitles") or "").strip().lower()
+        finishing.save_subtitles = subtitle_format in ("srt", "vtt", "webvtt")
+        finishing.subtitle_format = "WebVTT" if subtitle_format in ("vtt", "webvtt") else "SRT"
+        language = request.get("language") or self.language_combo.currentData() or "en"
+        if request.get("save"):
+            output_dir = os.path.join(self.output_directory, "api")
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            output_dir = tempfile.mkdtemp(prefix="tts_api_")
+        name = documents.safe_file_stem(str(request.get("name") or "api")) if request.get("save") else "api"
+        self.api_busy = True
+        self.generate_button.setEnabled(False)
+        self.preview_button.setEnabled(False)
+        self.model_repo_combo.setEnabled(False)
+        self.set_status_message("Status: Generating for a local API request...")
+        loaded = self.loaded_entry()
+        return {
+            "generator": dict(
+                model=model, text=text, audio_prompt_path=reference,
+                exaggeration=self.exaggeration_slider.get_value(), temperature=self.temp_slider.get_value(),
+                cfg_weight=self.cfg_slider.get_value(), seed=0, output_dir=output_dir, language_id=language,
+                repetition_penalty=self.repetition_penalty, min_p=self.min_p, top_p=self.top_p,
+                finishing=finishing, output_name=name, preview=False),
+            "pronunciations": self.pronunciations,
+            "model_label": loaded["label"] if loaded else None,
+            "voice_label": voice_label,
+            "mime": {"WAV": "audio/wav", "FLAC": "audio/flac", "MP3": "audio/mpeg"}.get(output_format, "audio/wav"),
+            "temporary": not request.get("save"),
+        }
+
+    def api_find_voice(self, name):
+        name = str(name or "").strip()
+        if not name:
+            return None
+        lowered = name.lower()
+        for voice in self.voice_library.voices:
+            if lowered in (voice.id.lower(), voice.name.lower()):
+                return voice
+        return None  # maybe a built-in speaker of the loaded model (handled later)
+
+    def api_apply_voice(self, voice, reference):
+        """Point the loaded model at a library voice; returns (reference clip, label)."""
+        model = self.active_qwen_model()
+        path = self.voice_library.clip_path(voice)
+        if voice.kind == "clip" or (model is None or model.mode == "base"):
+            if not voice.has_clip or not os.path.exists(path):
+                raise local_api.ApiError(400, f"{voice.name} has no clip; this model clones from a clip.")
+            if model is not None:
+                model.ref_text = voice_library.read_transcript(path)
+            return path, voice.name
+        if voice.kind == "preset" and model.mode in ("custom_voice", "preset"):
+            model.speaker = voice.speaker
+            if model.mode == "custom_voice":
+                model.instruct = voice.style
+        elif voice.kind == "design" and model.mode == "voice_design":
+            model.instruct = voice.description
+        else:
+            raise local_api.ApiError(400, f"{voice.name} doesn't fit the loaded model.")
+        return reference, voice.name
+
+    OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"}
+
+    def api_apply_speaker(self, name):
+        """A built-in speaker of the loaded model (Kokoro/Qwen), by id or plain name."""
+        model = self.active_qwen_model()
+        speakers = getattr(model, "speakers", []) or []
+        lowered = name.lower()
+        match = next((speaker for speaker in speakers if speaker.lower() == lowered), None)
+        if match is None:  # "alloy" -> Kokoro's af_alloy, "heart" -> af_heart
+            match = next((speaker for speaker in speakers if speaker.lower().split("_", 1)[-1] == lowered), None)
+        if match is not None:
+            model.speaker = match
+            return match
+        if lowered in self.OPENAI_VOICES:
+            return self.voice_chip.text()  # no such voice here: use the app's current voice
+        raise local_api.ApiError(404, f"No voice called {name!r}. See GET /v1/voices.", "not_found")
+
+    def api_end(self):
+        self.api_busy = False
+        has_model = self.model is not None
+        self.generate_button.setEnabled(has_model)
+        self.preview_button.setEnabled(has_model)
+        self.model_repo_combo.setEnabled(not getattr(self, "model_is_loading", False))
+        self.set_status_message("Status: Finished a local API request. Ready.")
 
     # --- Pronunciation dictionary ---
 
@@ -3652,6 +4132,14 @@ class ChatterboxApp(QMainWindow):
                 self.qwen_settings.update(speaker=voice.speaker, style=voice.style)
         else:
             self.engine_settings(model)["description"] = voice.description
+            path = self.voice_library.clip_path(voice)
+            if hasattr(model, "locked_anchor"):
+                model.locked_anchor = None
+                self.locked_voice_name = None
+            if voice.has_clip and os.path.exists(path) and hasattr(model, "locked_anchor"):
+                model.locked_anchor = (path, voice_library.read_transcript(path))
+                self.locked_description = voice.description
+                self.locked_voice_name = voice.name
         self.update_engine_controls()
         if voice.kind == "preset":
             index = self.qwen_speaker_combo.findData(voice.speaker)
@@ -3922,7 +4410,7 @@ class ChatterboxApp(QMainWindow):
         return self.model is not None and self.entry_key(entry) == self.loaded_entry_key()
 
     def model_busy(self):
-        return getattr(self, "model_is_loading", False) or self.is_generating
+        return getattr(self, "model_is_loading", False) or self.is_generating or getattr(self, "api_busy", False)
 
     def render_model_tiles(self):
         if not hasattr(self, "capability_tabs"):
@@ -4568,7 +5056,7 @@ class ChatterboxApp(QMainWindow):
         self.model_repo_combo.setEnabled(not getattr(self, "model_is_loading", False))
         self.update_model_details()
         self.generation_progress.setVisible(False)
-        if not self.keep_take_button.isVisible():
+        if not self.keep_take_button.isVisible() and not self.keep_voice_button.isVisible():
             self.activity_label.clear()
         self.update_text_stats()
 
@@ -4663,6 +5151,10 @@ class ChatterboxApp(QMainWindow):
             self.last_preview_seed = thread.actual_seed_used
             self.activity_label.setText(f"Preview take {self.last_preview_seed}")
             self.keep_take_button.setVisible(self.seed_input.value() == 0)
+            designed = self.active_qwen_model()
+            self.keep_voice_button.setVisible(
+                designed is not None and designed.mode == "voice_design"
+                and getattr(designed, "_anchor", None) is not None and not getattr(designed, "locked_anchor", None))
             self.set_status_message(f"Status: Preview ready{total_generation_time_str}.")
         elif thread.partial_info:
             done, total = thread.partial_info
@@ -4846,6 +5338,8 @@ class ChatterboxApp(QMainWindow):
 
     def closeEvent(self, event):
         global APP_LOG_SINK
+        if self.api_server is not None:
+            self.api_server.stop()
         if APP_LOG_SINK == self.log_message_signal.emit:
             APP_LOG_SINK = None
         self.save_window_settings()

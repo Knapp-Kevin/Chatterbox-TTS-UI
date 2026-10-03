@@ -120,6 +120,7 @@ class OmniVoiceModel:
         self._temp_dir = tempfile.mkdtemp(prefix="omnivoice_tts_")
         self._count = 0
         self._anchor = None
+        self.locked_anchor = None  # (clip, transcript) of a kept designed voice
 
     def set_mode(self, mode):
         self.voice_mode = "design" if mode == "design" else "clone"
@@ -127,8 +128,9 @@ class OmniVoiceModel:
 
     def begin_run(self):
         """A designed voice differs on every call, so the first section of a run becomes
-        the reference for the rest and the whole document keeps one voice."""
-        self._anchor = None
+        the reference for the rest and the whole document keeps one voice. A kept voice
+        is used from the start."""
+        self._anchor = self.locked_anchor
 
     def to(self, _device):
         return self

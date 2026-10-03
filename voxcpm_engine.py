@@ -73,6 +73,7 @@ class VoxCPMModel:
         self._watermark = engine_worker.PerthWatermark()
         self._temp_dir = tempfile.mkdtemp(prefix="voxcpm_tts_")
         self._anchor = None
+        self.locked_anchor = None  # (clip, transcript) of a kept designed voice
 
     def set_mode(self, mode):
         # "base" and "voice_design" match the Qwen modes the UI already knows.
@@ -82,8 +83,8 @@ class VoxCPMModel:
     def begin_run(self):
         """Called before each preview or render. A designed voice is invented afresh by
         every call, so the first section of a run becomes the reference for the rest,
-        keeping one voice for the whole document."""
-        self._anchor = None
+        keeping one voice for the whole document. A kept voice is used from the start."""
+        self._anchor = self.locked_anchor
 
     def to(self, _device):
         return self

@@ -21,6 +21,7 @@ Windows remains the primary maintained path.
 * [Screenshots](#screenshots)
 * [What's New in This Fork](#whats-new-in-this-fork)
 * [Features](#features)
+* [Local API](#local-api)
 * [Language Support](#language-support)
 * [Prerequisites](#prerequisites)
 * [Installation & Usage](#installation--usage)
@@ -78,10 +79,11 @@ Windows remains the primary maintained path.
 
 ### Documents and long text
 
-*   **Open document...** loads `.txt` (UTF-8, UTF-16 or Windows-1252), `.md` (formatting stripped) or `.docx`. Text stays editable.
+*   **Open...** loads `.txt` (UTF-8, UTF-16 or Windows-1252), `.md` (formatting stripped) or `.docx`. Text stays editable.
 *   **A live summary** under the text, for example "About 1 min 40 s · 4 sections · 553 characters". It updates as you edit, even during a render. Click the estimate to compare every model's time for the current text and switch to one.
 *   **Estimates are learned per model** from your own runs, so they get more accurate with use.
-*   **Preview** generates your selection, or the opening section, so you can check the voice and settings first. **Keep this take** locks the preview's take number, so the full render matches.
+*   **Preview** generates your selection, or the opening of the text: pick about **10 s, 20 s, 30 s or 1 min** next to it. **Keep this take** locks the preview's take number, so the full render matches.
+*   **Keep this voice** appears after previewing with a voice design model. It saves the voice you just heard to the voice library as a designed voice with its clip, and locks it in: the full render, and any later render, use exactly that voice. Using a saved designed voice from the library locks it the same way. Change the description to design a new one.
 *   **Progress** shows the sections being generated and the time remaining, for example "9–16/18 · 0:41 left".
 *   **Stop keeps your work.** Finished sections are saved as a `_partial` file.
 *   **Output files** are named after the document.
@@ -142,6 +144,7 @@ Windows remains the primary maintained path.
 ### Qwen3-TTS engine (optional)
 
 *   Three Apache-2.0 models: **Qwen3 preset voices** (9 built-in speakers), **Qwen3 voice design** and **Qwen3 voice cloning**. Each is about 4.2 GB, and they cover 10 languages.
+*   **One designed voice per document.** Qwen's design model invents a new voice on every call, including for every section in a batch. So the first section is designed and the rest are spoken by Qwen3 voice cloning in that voice (Qwen's own "design, then clone" workflow). The cloning model loads beside the design model the first time, which adds about 4.5 GB of GPU memory. In a measured run, the voice similarity between sections rose from 0.76 to 0.91.
 *   Qwen needs different library versions than Chatterbox (`transformers` 4.57 vs 5.2). It runs in its own environment (`engines/qwen/.venv`) as a background worker. The first time you load a Qwen model, the app offers to install it.
 *   **Batched generation.** Several sections go to the GPU in one call: up to 16 sections or about 5,000 characters, whichever comes first. On an RTX 5070 Ti, an 18-section document took about 1 min 50 s, against about 10 minutes one section at a time. A batch that doesn't fit in GPU memory is split automatically.
 *   **Optional watermark.** Qwen output can get the same inaudible Perth AI watermark that Chatterbox applies.
@@ -199,6 +202,33 @@ Windows remains the primary maintained path.
 
 </details>
 
+## Local API
+
+Other programs on this PC can use the app's models and voices. Turn it on under **Advanced → Local API**. It listens only on `127.0.0.1` (default port `8765`), so nothing outside your computer can reach it. Set a **Token** to require `Authorization: Bearer <token>`.
+
+Requests use the same pipeline as the Generate button: sectioning, batching, finishing touches and the pronunciation dictionary. They take turns with the app's own generations; if the app is busy, a request gets `503` and can retry. Naming a model that isn't loaded loads it first.
+
+**OpenAI-compatible**, for tools that already speak the OpenAI speech API (Open WebUI, SillyTavern, scripts using the `openai` package with `base_url="http://127.0.0.1:8765/v1"`):
+
+```bash
+curl http://127.0.0.1:8765/v1/audio/speech -H "Content-Type: application/json" -d "{\"input\": \"Hello from my own computer.\", \"voice\": \"alloy\", \"response_format\": \"mp3\"}" -o speech.mp3
+```
+
+*   `model`: a name from `GET /v1/models` (for example `"Kokoro voices"`), or `tts-1` / `tts-1-hd` / `gpt-4o-mini-tts` for whatever is loaded.
+*   `voice`: a voice library name, a built-in voice of the loaded model (`"heart"` or `"af_heart"` for Kokoro, `"vivian"` for Qwen), or an OpenAI voice name. OpenAI names map to Kokoro's voice of that name when Kokoro is loaded (`alloy` → `af_alloy`), and otherwise use the app's current voice.
+*   `response_format`: `mp3`, `wav` or `flac`. `speed`: 0.75–1.25.
+*   `instructions`: a style, or the voice description for voice design models.
+
+**Native**, for everything the app can do. It saves to `chatterbox_outputs/api/` and replies with details:
+
+```bash
+curl http://127.0.0.1:8765/v1/speech -H "Content-Type: application/json" -d "{\"text\": \"Chapter one...\", \"model\": \"Kokoro voices\", \"voice\": \"george\", \"subtitles\": \"srt\", \"format\": \"flac\", \"name\": \"chapter1\"}"
+```
+
+The reply looks like `{"path": "...chapter1_....flac", "subtitles": "...srt", "seconds": 4.09, "generation_seconds": 1.16, "model": "Kokoro voices", "voice": "bm_george", "sample_rate": 24000, "seed": ...}`. Other fields: `language`, `style`, `speed`.
+
+**Discovery:** `GET /v1/health` (what's loaded, ready or busy), `GET /v1/models`, `GET /v1/voices` (your library, plus the loaded model's built-in and sample voices). Errors come back as `{"error": {"message": ..., "type": ...}}`.
+
 ## Language Support
 
 <details>
@@ -254,8 +284,8 @@ Windows remains the primary maintained path.
 
     The first launch can take several minutes while PyTorch and the default model (about 3 GB) download. Installer decisions are logged to `logs\installer_*.log`, and startup crashes to `logs\app_startup_*.log`. Later launches start in seconds.
 3.  **Generate speech:**
-    *   Type or paste text, or click **Open document...**.
-    *   Optionally click **Preview** to hear a sample, then **Keep this take** if you like it.
+    *   Type or paste text, or click **Open...**.
+    *   Optionally click **Preview** to hear a sample (choose its length next to it), then **Keep this take**, or **Keep this voice** for a designed voice, if you like it.
     *   Click **Generate Audio**. Results are saved to `chatterbox_outputs/` and listed under the player.
 4.  **Clone a voice:** on the **Voice** page, pick a microphone and click **Record...**, or **Add a file...**. The voice joins your library, and the selected clip is used by the cloning models.
     *   Chatterbox relies mostly on the first 6–10 seconds of a clip, so start speaking right away and keep the room quiet.
@@ -325,6 +355,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
 *   `audio_effects.py`: finishing touches, seam-aware joining, speed and pitch, and WAV/FLAC/MP3 export.
 *   `subtitles.py`: subtitles from the generation timeline: caption splitting, pause snapping, SRT and WebVTT.
 *   `pronunciation.py`: the pronunciation dictionary: matching, respelling, import and export.
+*   `local_api.py`: the local HTTP API server (OpenAI-compatible and native endpoints).
 *   `ui_theme.py` and `assets/`: the light/dark theme, painted surfaces, icons and logo.
 *   `models.json`: the model list, managed from the Model page.
 *   `requirements.in` / `requirements.lock.txt`: direct dependencies and the fully pinned lock (`uv pip compile`).

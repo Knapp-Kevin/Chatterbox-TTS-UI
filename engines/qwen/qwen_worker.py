@@ -35,15 +35,10 @@ def main():
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    state = {"model": None, "model_id": None, "mode": None, "clone_prompts": {}}
+    state = {"model": None, "model_id": None, "mode": None, "clone_prompts": {},
+             "clone_model": None, "clone_model_id": None}
 
-    def load(model_id):
-        if state["model_id"] == model_id:
-            return
-        state["model"] = None
-        state["clone_prompts"].clear()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    def from_pretrained(model_id):
         cuda = torch.cuda.is_available()
         # Load from the local cache when the model is already downloaded, so loading
         # (and therefore generation) works offline; qwen-tts otherwise asks the Hub for
@@ -53,21 +48,41 @@ def main():
             source = snapshot_download(model_id, local_files_only=True)
         except Exception:
             source = model_id  # not cached yet: download it
-        model = Qwen3TTSModel.from_pretrained(
+        return Qwen3TTSModel.from_pretrained(
             source,
             device_map="cuda:0" if cuda else "cpu",
             dtype=torch.bfloat16 if cuda else torch.float32,
             attn_implementation="sdpa",
         )
+
+    def load(model_id):
+        if state["model_id"] == model_id:
+            return
+        state.update(model=None, clone_model=None, clone_model_id=None)
+        state["clone_prompts"].clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        model = from_pretrained(model_id)
         state.update(model=model, model_id=model_id,
                      mode=getattr(model.model, "tts_model_type", None)
                      or getattr(model.model.config, "tts_model_type", None))
 
-    def clone_prompt(ref_audio, ref_text):
-        key = (ref_audio, os.path.getmtime(ref_audio), ref_text or "")
+    def clone_model(model_id):
+        """A Base (cloning) model beside a voice design model: Qwen's own "design, then
+        clone" workflow, which keeps a designed voice the same across sections."""
+        if state["mode"] == "base":
+            return state["model"]
+        if state["clone_model_id"] != model_id:
+            state.update(clone_model=None, clone_model_id=None)
+            print(f"Loading {model_id} to keep the designed voice consistent...", file=sys.stderr)
+            state.update(clone_model=from_pretrained(model_id), clone_model_id=model_id)
+        return state["clone_model"]
+
+    def clone_prompt(model, ref_audio, ref_text):
+        key = (id(model), ref_audio, os.path.getmtime(ref_audio), ref_text or "")
         if key not in state["clone_prompts"]:
             state["clone_prompts"].clear()
-            state["clone_prompts"][key] = state["model"].create_voice_clone_prompt(
+            state["clone_prompts"][key] = model.create_voice_clone_prompt(
                 ref_audio=ref_audio, ref_text=ref_text or None,
                 x_vector_only_mode=not ref_text)
         return state["clone_prompts"][key]
@@ -86,6 +101,8 @@ def main():
         # single-sequence decoding, so batching sections multiplies throughput.
         texts = req.get("texts") or [req["text"]]
         mode = req["mode"]
+        if req.get("clone_model_id"):
+            model, mode = clone_model(req["clone_model_id"]), "base"
         wavs, sr = run_batch(model, mode, texts, req, sampling)
         out_paths = req.get("out_paths") or [req["out_path"]]
         seconds = []
@@ -127,7 +144,7 @@ def main():
         elif mode == "base":
             if not req.get("ref_audio"):
                 raise ValueError("Pick a reference clip on the Voice page to clone.")
-            prompt = clone_prompt(req["ref_audio"], req.get("ref_text"))
+            prompt = clone_prompt(model, req["ref_audio"], req.get("ref_text"))
             wavs, sr = model.generate_voice_clone(
                 text=texts, language=language, voice_clone_prompt=list(prompt) * count, **sampling)
         else:
