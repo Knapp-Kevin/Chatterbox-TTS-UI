@@ -130,6 +130,12 @@ Windows remains the primary maintained path.
 ### Finishing touches and Advanced
 
 *   **Finishing touches** (Generate page, lossless): paragraph pause, even out volume, trim silence at the start and end, save as WAV or FLAC, and **Save subtitles**.
+*   **Pronunciation dictionary** (Advanced page → **Edit dictionary...**): respell words the way they should sound, for example `Nguyen → Win`, `SQL → sequel`, `Siobhan → Shiv-awn`.
+    *   It works with every model, because the respelling happens before the text is spoken. Subtitles keep your spelling, and conversation scripts keep their speaker names.
+    *   Each rule can match whole words only and match case, and can be switched off. Longer phrases win ("New York City" before "New York"). A capital carries over ("Nguyen" → "Win"), but not from all-caps acronyms ("GIF" → "jif").
+    *   **Hear it** speaks a respelling with the loaded model and voice. **Try** shows (and **Hear** plays) how a sentence will be read.
+    *   **Import...** / **Export...** use a plain list (one `word, say it as` per line; `=` or tabs work too) or JSON.
+    *   The Generate page shows how many words in your text will be respelled. The dictionary is saved in `pronunciations.json`.
 *   **Subtitles** (`.srt` or `.vtt`, saved next to the audio) need no speech recognition. The app knows which text went into each section and where that section lands in the final audio. Captions are split at sentence and clause breaks (up to two lines of about 42 characters) and timed by length. Each caption change is then snapped to a real pause in the audio. Speed changes and trimmed silence are accounted for. In VibeVoice conversations each caption carries its speaker: `Linda: …` in SRT, a voice tag in WebVTT. Previews don't make subtitles.
 *   **Advanced page:** **Speed** and **Pitch** (FFmpeg's Rubber Band with formant preservation when available, librosa otherwise), **Save results as MP3**, and the **Subtitle format** (SRT for video editors, YouTube and VLC; WebVTT for web players). A note explains that these can weaken the inaudible AI watermark, and the Finishing touches summary flags them while they're active.
 
@@ -318,6 +324,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
 *   `documents.py`: document loading, paragraph-aware sectioning, conversation scripts (speakers and turn-aware sections) and batch planning.
 *   `audio_effects.py`: finishing touches, seam-aware joining, speed and pitch, and WAV/FLAC/MP3 export.
 *   `subtitles.py`: subtitles from the generation timeline: caption splitting, pause snapping, SRT and WebVTT.
+*   `pronunciation.py`: the pronunciation dictionary: matching, respelling, import and export.
 *   `ui_theme.py` and `assets/`: the light/dark theme, painted surfaces, icons and logo.
 *   `models.json`: the model list, managed from the Model page.
 *   `requirements.in` / `requirements.lock.txt`: direct dependencies and the fully pinned lock (`uv pip compile`).
@@ -328,6 +335,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
     *   `chatterbox_outputs/`: generated audio.
     *   `reference_recordings/`: your microphone recordings.
     *   `voice_library/`: the voice library index (`voices.json`) and the clips it makes.
+    *   `pronunciations.json`: your pronunciation dictionary.
     *   `logs/`: installer and startup logs.
     *   `app_settings.json`: window, delivery and finishing settings, learned speeds, and the Hugging Face token.
 </details>

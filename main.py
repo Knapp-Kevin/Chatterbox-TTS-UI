@@ -127,7 +127,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QListWidget, QListWidgetItem, QGroupBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QPlainTextEdit, QSplitter, QLineEdit,
     QCheckBox, QComboBox, QProgressBar, QSizePolicy, QFrame, QStackedWidget, QLayout,
-    QMenu, QTabBar
+    QMenu, QTabBar, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 # QStandardPaths was in your full file, good.
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QTime
@@ -138,6 +138,7 @@ from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette, Q
 import ui_theme
 import audio_effects
 import subtitles
+import pronunciation
 import documents
 import model_registry
 import qwen_engine
@@ -150,6 +151,7 @@ import voice_library
 import math
 import gc
 import time
+import tempfile
 from collections import deque
 import wave
 
@@ -615,6 +617,7 @@ class AudioGeneratorThread(QThread):
         self.preview = preview
         self.partial_info = None
         self.subtitle_path = None
+        self.pronunciations = None  # set by the app; respells what is spoken
         self.model = model
         self.original_text = text
         self.audio_prompt_path = audio_prompt_path
@@ -676,6 +679,15 @@ class AudioGeneratorThread(QThread):
                 planned = planned[:PREVIEW_MAX_SECTIONS]
             final_chunks = [section.text for section in planned]
             self.section_boundaries = [section.boundary for section in planned]
+            # What the model is given: the pronunciation dictionary applied. final_chunks
+            # keeps the written text for subtitles.
+            spoken_chunks = list(final_chunks)
+            if self.pronunciations is not None:
+                respelled = [self.pronunciations.apply_section(chunk) for chunk in final_chunks]
+                spoken_chunks = [chunk for chunk, _count in respelled]
+                replaced = sum(count for _chunk, count in respelled)
+                if replaced:
+                    print(f"Pronunciation dictionary: respelled {replaced} word(s).")
             print(f"Split into {len(planned)} sections (up to {max_chars} characters, "
                   "never across paragraphs).")
 
@@ -715,7 +727,7 @@ class AudioGeneratorThread(QThread):
                     self.error_occurred.emit(
                         f"Generation stopped by user at chunk {i+1}/{total_chunks}.")
                     return
-                batch = final_chunks[i:batch_end]
+                batch = spoken_chunks[i:batch_end]
                 current_chunk_num = i + 1
                 last = i + len(batch)
                 self.chunk_generated.emit(current_chunk_num, last, total_chunks)
@@ -1463,6 +1475,171 @@ class VoiceDetailsDialog(QDialog):
         return bool(self.clip_checkbox and self.clip_checkbox.isChecked())
 
 
+class PronunciationDialog(QDialog):
+    """Edit the pronunciation dictionary: "write this" -> "say it as"."""
+
+    COLUMNS = ("Write", "Say it as", "Whole word", "Match case", "On")
+
+    def __init__(self, dictionary, speak, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pronunciation dictionary")
+        self.setMinimumSize(640, 460)
+        self.dictionary = dictionary
+        self.speak = speak  # callable(text): plays text with the loaded model
+        layout = QVBoxLayout(self)
+        intro = QLabel("Respell words the way they should sound, e.g. Nguyen \u2192 Win, SQL \u2192 sequel, "
+                       "Siobhan \u2192 Shiv-awn. Works with every model; subtitles keep your spelling.")
+        intro.setObjectName("Muted")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in (2, 3, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.itemChanged.connect(lambda _item: self.update_try())
+        for rule in dictionary.rules:
+            self._add_row(rule)
+        layout.addWidget(self.table, 1)
+        row_actions = QHBoxLayout()
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self.add_rule)
+        remove_button = QPushButton("Remove")
+        remove_button.clicked.connect(self.remove_rules)
+        self.hear_button = QPushButton("Hear it")
+        self.hear_button.setToolTip("Speak the selected respelling with the loaded model and voice.")
+        self.hear_button.clicked.connect(self.hear_selected)
+        for button in (add_button, remove_button, self.hear_button):
+            row_actions.addWidget(button)
+        row_actions.addStretch(1)
+        import_button = self._link_button("Import\u2026", self.import_rules)
+        export_button = self._link_button("Export\u2026", self.export_rules)
+        row_actions.addWidget(import_button)
+        row_actions.addWidget(export_button)
+        layout.addLayout(row_actions)
+        try_row = QHBoxLayout()
+        try_row.addWidget(QLabel("Try"))
+        self.try_input = QLineEdit()
+        self.try_input.setPlaceholderText("Type a sentence to see (and hear) how it will be read")
+        self.try_input.textChanged.connect(lambda _text: self.update_try())
+        try_row.addWidget(self.try_input, 1)
+        hear_try = QPushButton("Hear")
+        hear_try.clicked.connect(lambda: self.speak(self.try_result()) if self.try_input.text().strip() else None)
+        try_row.addWidget(hear_try)
+        layout.addLayout(try_row)
+        self.try_output = QLabel()
+        self.try_output.setObjectName("Muted")
+        self.try_output.setWordWrap(True)
+        layout.addWidget(self.try_output)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _link_button(self, text, slot):
+        button = QPushButton(text)
+        button.setFlat(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(slot)
+        return button
+
+    def _add_row(self, rule):
+        self.table.blockSignals(True)
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(rule.word))
+        self.table.setItem(row, 1, QTableWidgetItem(rule.say))
+        for column, value in ((2, rule.whole_word), (3, rule.match_case), (4, rule.enabled)):
+            item = QTableWidgetItem()
+            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            item.setCheckState(Qt.CheckState.Checked if value else Qt.CheckState.Unchecked)
+            self.table.setItem(row, column, item)
+        self.table.blockSignals(False)
+        return row
+
+    def rules(self):
+        rules = []
+        for row in range(self.table.rowCount()):
+            text = lambda column: (self.table.item(row, column).text() if self.table.item(row, column) else "").strip()
+            checked = lambda column: self.table.item(row, column).checkState() == Qt.CheckState.Checked
+            if text(0):
+                rules.append(pronunciation.Rule(text(0), text(1), checked(2), checked(3), checked(4)))
+        return rules
+
+    def add_rule(self):
+        row = self._add_row(pronunciation.Rule("", ""))
+        self.table.setCurrentCell(row, 0)
+        self.table.editItem(self.table.item(row, 0))
+
+    def remove_rules(self):
+        for row in sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(row)
+        self.update_try()
+
+    def hear_selected(self):
+        row = self.table.currentRow()
+        if row >= 0 and self.table.item(row, 1) and self.table.item(row, 1).text().strip():
+            self.speak(self.table.item(row, 1).text().strip())
+
+    def try_result(self):
+        preview = pronunciation.Dictionary.__new__(pronunciation.Dictionary)
+        preview.rules, preview.enabled, preview._pattern, preview._key = self.rules(), True, None, None
+        return preview.apply(self.try_input.text())[0]
+
+    def update_try(self):
+        text = self.try_input.text().strip()
+        self.try_output.setText(f"Read as: {self.try_result()}" if text else "")
+
+    def import_rules(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Import pronunciations", "", "Word lists (*.json *.txt *.csv *.tsv);;All files (*.*)")
+        if not path:
+            return
+        try:
+            imported = pronunciation.import_rules(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Import", f"Couldn't read {os.path.basename(path)}:\n{exc}")
+            return
+        existing = {rule.word.lower() for rule in self.rules()}
+        added = [rule for rule in imported if rule.word.lower() not in existing]
+        for rule in added:
+            self._add_row(rule)
+        self.update_try()
+        QMessageBox.information(self, "Import", f"Added {len(added)} of {len(imported)} words "
+                                f"({len(imported) - len(added)} were already in the dictionary).")
+
+    def export_rules(self):
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export pronunciations", "pronunciations.txt", "Text list (*.txt);;JSON (*.json)")
+        if path:
+            pronunciation.export_rules(path, self.rules())
+
+
+class SpeakThread(QThread):
+    """Speak a short text with the loaded model (for trying respellings)."""
+
+    finished_with = Signal(object, int, str)  # waveform, sample rate, error
+
+    def __init__(self, model, text, kwargs, parent=None):
+        super().__init__(parent)
+        self.model, self.text, self.kwargs = model, text, kwargs
+
+    def run(self):
+        try:
+            try:
+                wav = self.model.generate(self.text, **self.kwargs)
+            except TypeError:
+                wav = self.model.generate(self.text)  # older loaders take fewer options
+            data = wav.squeeze(0).detach().cpu().numpy() if hasattr(wav, "detach") else np.asarray(wav)
+            self.finished_with.emit(np.asarray(data, dtype=np.float32).reshape(-1), int(self.model.sr), "")
+        except Exception as exc:
+            self.finished_with.emit(None, 0, str(exc))
+
+
 class MakeClipThread(QThread):
     """Generates a reference clip with the current voice: a phonetically rich passage, so
     the clip comes with an exact transcript."""
@@ -1594,6 +1771,7 @@ class ChatterboxApp(QMainWindow):
         self.recordings_directory = os.path.join(
             self.script_dir, REFERENCE_RECORDINGS_DIRNAME)
         self.voice_library = voice_library.VoiceLibrary(self.script_dir, self.recordings_directory)
+        self.pronunciations = pronunciation.Dictionary(os.path.join(self.script_dir, pronunciation.FILENAME))
         self.active_voice_id = None
         self.pending_voice = None
         self.media_devices = QMediaDevices(self)
@@ -1858,6 +2036,11 @@ class ChatterboxApp(QMainWindow):
         qwen_row_layout.setSpacing(10)
         qwen_settings = self.app_settings.get("qwen", {})
         self.qwen_speaker_combo = QComboBox()
+        # Kokoro's voice names are long ("Heart (US English, female)"); the list opens wide
+        # anyway, so the box itself stays compact instead of widening the window.
+        self.qwen_speaker_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.qwen_speaker_combo.setMinimumContentsLength(14)
+        self.qwen_speaker_combo.view().setMinimumWidth(260)
         self.qwen_speaker_combo.setToolTip("Built-in Qwen speaker.")
         self.qwen_speaker_combo.currentIndexChanged.connect(lambda _i: self.refresh_voice_chip())
         self.qwen_speaker_label = QLabel("Speaker")
@@ -2332,6 +2515,26 @@ class ChatterboxApp(QMainWindow):
         effects_layout.addLayout(effects_grid)
         advanced_layout.addWidget(effects_card)
 
+        pronunciation_card, pronunciation_layout = self._make_card("Pronunciation")
+        pronunciation_row = QHBoxLayout()
+        self.pronunciation_checkbox = QCheckBox("Use the pronunciation dictionary")
+        self.pronunciation_checkbox.setChecked(self.pronunciations.enabled)
+        self.pronunciation_checkbox.setToolTip(
+            "Respell words before they're spoken (names, acronyms, jargon). Applies to every model; "
+            "subtitles keep the original spelling.")
+        self.pronunciation_checkbox.toggled.connect(self.on_pronunciation_toggled)
+        pronunciation_row.addWidget(self.pronunciation_checkbox)
+        self.pronunciation_summary = QLabel()
+        self.pronunciation_summary.setObjectName("Muted")
+        pronunciation_row.addWidget(self.pronunciation_summary)
+        pronunciation_row.addStretch(1)
+        edit_pronunciations = QPushButton("Edit dictionary...")
+        edit_pronunciations.clicked.connect(self.edit_pronunciations)
+        pronunciation_row.addWidget(edit_pronunciations)
+        pronunciation_layout.addLayout(pronunciation_row)
+        advanced_layout.addWidget(pronunciation_card)
+        self.update_pronunciation_summary()
+
         export_card, export_layout = self._make_card("Export")
         self.mp3_checkbox = QCheckBox("Save results as MP3")
         self.mp3_checkbox.setToolTip(
@@ -2613,6 +2816,7 @@ class ChatterboxApp(QMainWindow):
             output_name=self.current_document_name,
             preview=preview,
         )
+        self.audio_generator_thread.pronunciations = self.pronunciations
         self.audio_generator_thread.generation_complete.connect(self.on_generation_complete)
         self.audio_generator_thread.error_occurred.connect(self.on_generation_error)
         self.audio_generator_thread.chunk_generated.connect(self.on_chunk_generated_progress)
@@ -2753,8 +2957,12 @@ class ChatterboxApp(QMainWindow):
         seconds, measured = self.estimate_seconds(entry, lengths)
         self.estimate_button.setText(f"About {self.format_duration(seconds)} \u25be")
         self.estimate_button.setVisible(True)
+        respelled = self.pronunciations.count_in(text)
         self.text_stats_label.setText(
-            f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters")
+            f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters"
+            + (f" \u00b7 {respelled} respelled" if respelled else ""))
+        self.text_stats_label.setToolTip(
+            "Words changed by the pronunciation dictionary (Advanced page)." if respelled else "")
         visible = self.get_visible_model_entries()
         for index in range(self.model_repo_combo.count()):
             position = self.model_repo_combo.itemData(index)
@@ -3025,6 +3233,63 @@ class ChatterboxApp(QMainWindow):
             settings["speaker"] = qwen.speaker
             self.app_settings["qwen"] = settings
         return None
+
+    # --- Pronunciation dictionary ---
+
+    def update_pronunciation_summary(self):
+        rules = self.pronunciations.rules
+        active = sum(1 for rule in rules if rule.enabled)
+        self.pronunciation_summary.setText(
+            f"{active} word{'s' if active != 1 else ''}" + (f" ({len(rules) - active} off)" if active != len(rules) else "")
+            if rules else "Empty")
+
+    def on_pronunciation_toggled(self, checked):
+        self.pronunciations.enabled = checked
+        self.pronunciations.save()
+        self.update_text_stats()
+
+    def edit_pronunciations(self):
+        dialog = PronunciationDialog(self.pronunciations, self.speak_text, self)
+        if dialog_accepted(dialog.exec()):
+            self.pronunciations.set_rules(dialog.rules())
+            self.pronunciations.save()
+            self.update_pronunciation_summary()
+            self.update_text_stats()
+            self.set_status_message(f"Status: Saved {len(self.pronunciations.rules)} pronunciations.")
+
+    def speak_text(self, text):
+        """Say a short text with the loaded model and voice (used by Hear it)."""
+        if self.model is None or self.model_busy() or not text.strip():
+            self.set_status_message("Status: Load a model (and wait for any generation) to hear it.")
+            return
+        if getattr(self, "speak_thread", None) is not None and self.speak_thread.isRunning():
+            return
+        kwargs = {"language_id": self.language_combo.currentData() or "en"}
+        reference = self.ref_audio_path_label.toolTip()
+        if self.active_qwen_model() is not None:
+            problem = self.prepare_qwen_generation()
+            if problem:
+                QMessageBox.information(self, "Hear It", problem)
+                return
+        if reference:
+            kwargs["audio_prompt_path"] = reference
+        self.set_status_message(f"Status: Speaking \u201c{text[:40]}\u201d...")
+        self.speak_thread = SpeakThread(self.model, text, kwargs, self)
+        self.speak_thread.finished_with.connect(self.on_spoken)
+        self.speak_thread.start()
+
+    def on_spoken(self, wav, sr, error):
+        if error or wav is None:
+            self.set_status_message(f"Status: Couldn't speak it: {error}")
+            return
+        import soundfile
+        path = os.path.join(tempfile.gettempdir(), "tts_pronunciation_check.wav")
+        soundfile.write(path, np.clip(wav, -1.0, 1.0), sr, subtype="PCM_16")
+        self.stop_reference_preview()
+        self.preview_player.setSource(QUrl())
+        self.preview_player.setSource(QUrl.fromLocalFile(path))
+        self.preview_player.play()
+        self.set_status_message("Status: Playing the pronunciation check.")
 
     # --- Conversations (VibeVoice) ---
 
