@@ -43,6 +43,8 @@ class FinishingSettings:
     even_volume: bool = True
     trim_silence: bool = True
     output_format: str = "WAV"
+    save_subtitles: bool = False
+    subtitle_format: str = "SRT"
 
     @classmethod
     def from_dict(cls, payload):
@@ -56,6 +58,8 @@ class FinishingSettings:
         settings.paragraph_pause = float(np.clip(settings.paragraph_pause, *PAUSE_RANGE))
         if settings.output_format not in OUTPUT_FORMATS:
             settings.output_format = "WAV"
+        if settings.subtitle_format not in ("SRT", "WebVTT"):
+            settings.subtitle_format = "SRT"
         return settings
 
     def to_dict(self):
@@ -73,6 +77,8 @@ class FinishingSettings:
         if self.trim_silence:
             parts.append("trimmed")
         parts.append(self.output_format)
+        if self.save_subtitles:
+            parts.append(f"{self.subtitle_format} subtitles")
         return ", ".join(parts)
 
 
@@ -138,10 +144,12 @@ def _stretch_and_shift(wav, sr, speed, semitones, log):
 
 
 def _trim_silence(wav, sr):
+    """(trimmed wav, samples removed from the start)."""
     import librosa
     _trimmed, (start, end) = librosa.effects.trim(wav, top_db=TRIM_TOP_DB)
     pad = int(TRIM_PADDING_SECONDS * sr)
-    return wav[max(0, start - pad):min(len(wav), end + pad)]
+    first = max(0, start - pad)
+    return wav[first:min(len(wav), end + pad)], first
 
 
 def _even_volume(wav):
@@ -186,27 +194,40 @@ def _trim_edges(wav, sr):
     return wav[max(0, start - pad):min(len(wav), end + pad)]
 
 
-def join_sections(sections, sr, boundaries, paragraph_pause):
+def join_sections(sections, sr, boundaries, paragraph_pause, spans=None):
     """Concatenate mono sections with seam-appropriate silence between them:
     short within sentences and between sentences, longer at paragraphs and
-    headings. boundaries[i] is the seam after sections[i]."""
-    joined = []
+    headings. boundaries[i] is the seam after sections[i]. If spans is a list,
+    each section's (start, end) sample range in the result is appended to it."""
+    joined, position = [], 0
     for index, section in enumerate(sections):
         wav = _trim_edges(np.asarray(section, dtype=np.float32).reshape(-1), sr)
         joined.append(wav)
+        if spans is not None:
+            spans.append((position, position + len(wav)))
+        position += len(wav)
         if index < len(sections) - 1:
             gap = seam_gap(boundaries[index] if index < len(boundaries) else "sentence", paragraph_pause)
             joined.append(np.zeros(int(round(gap * sr)), dtype=np.float32))
+            position += int(round(gap * sr))
     return np.concatenate(joined) if joined else np.zeros(0, dtype=np.float32)
 
 
-def apply_finishing(wav, sr, settings, log=print):
-    """Apply speed/pitch, silence trim and loudness to a mono float waveform."""
+def apply_finishing(wav, sr, settings, log=print, timing=None):
+    """Apply speed/pitch, silence trim and loudness to a mono float waveform.
+    If timing is a dict, it receives how the timeline moved, for subtitles:
+    "scale" (new length / old length) and "offset" (seconds trimmed from the start)."""
     wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+    scale, offset = 1.0, 0.0
     if abs(settings.speed - 1.0) > 1e-6 or abs(settings.pitch_semitones) > 1e-6:
+        before = max(1, len(wav))
         wav = _stretch_and_shift(wav, sr, settings.speed, settings.pitch_semitones, log)
+        scale = len(wav) / before
     if settings.trim_silence:
-        wav = _trim_silence(wav, sr)
+        wav, first = _trim_silence(wav, sr)
+        offset = first / sr
+    if timing is not None:
+        timing.update(scale=scale, offset=offset)
     if settings.even_volume:
         wav = _even_volume(wav)
     return np.clip(wav, -1.0, 1.0)

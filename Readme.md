@@ -129,8 +129,9 @@ Windows remains the primary maintained path.
 
 ### Finishing touches and Advanced
 
-*   **Finishing touches** (Generate page, lossless): paragraph pause, even out volume, trim silence at the start and end, and save as WAV or FLAC.
-*   **Advanced page:** **Speed** and **Pitch** (FFmpeg's Rubber Band with formant preservation when available, librosa otherwise), and **Save results as MP3**. A note explains that these can weaken the inaudible AI watermark, and the Finishing touches summary flags them while they're active.
+*   **Finishing touches** (Generate page, lossless): paragraph pause, even out volume, trim silence at the start and end, save as WAV or FLAC, and **Save subtitles**.
+*   **Subtitles** (`.srt` or `.vtt`, saved next to the audio) need no speech recognition. The app knows which text went into each section and where that section lands in the final audio. Captions are split at sentence and clause breaks (up to two lines of about 42 characters) and timed by length. Each caption change is then snapped to a real pause in the audio. Speed changes and trimmed silence are accounted for. In VibeVoice conversations each caption carries its speaker: `Linda: …` in SRT, a voice tag in WebVTT. Previews don't make subtitles.
+*   **Advanced page:** **Speed** and **Pitch** (FFmpeg's Rubber Band with formant preservation when available, librosa otherwise), **Save results as MP3**, and the **Subtitle format** (SRT for video editors, YouTube and VLC; WebVTT for web players). A note explains that these can weaken the inaudible AI watermark, and the Finishing touches summary flags them while they're active.
 
 ### Qwen3-TTS engine (optional)
 
@@ -316,6 +317,7 @@ The optional Qwen, VoxCPM, OmniVoice, VibeVoice and Kokoro engines install thems
 *   `kokoro_engine.py` / `engines/kokoro/kokoro_worker.py`: the Kokoro engine. The worker runs inside `engines/kokoro/.venv`.
 *   `documents.py`: document loading, paragraph-aware sectioning, conversation scripts (speakers and turn-aware sections) and batch planning.
 *   `audio_effects.py`: finishing touches, seam-aware joining, speed and pitch, and WAV/FLAC/MP3 export.
+*   `subtitles.py`: subtitles from the generation timeline: caption splitting, pause snapping, SRT and WebVTT.
 *   `ui_theme.py` and `assets/`: the light/dark theme, painted surfaces, icons and logo.
 *   `models.json`: the model list, managed from the Model page.
 *   `requirements.in` / `requirements.lock.txt`: direct dependencies and the fully pinned lock (`uv pip compile`).

@@ -137,6 +137,7 @@ from PySide6.QtMultimedia import (
 from PySide6.QtGui import QDesktopServices, QPainter, QColor, QFont, QPalette, QIcon, QLinearGradient
 import ui_theme
 import audio_effects
+import subtitles
 import documents
 import model_registry
 import qwen_engine
@@ -613,6 +614,7 @@ class AudioGeneratorThread(QThread):
         self.output_name = output_name
         self.preview = preview
         self.partial_info = None
+        self.subtitle_path = None
         self.model = model
         self.original_text = text
         self.audio_prompt_path = audio_prompt_path
@@ -743,10 +745,11 @@ class AudioGeneratorThread(QThread):
             print("\nConcatenating audio chunks...")
             finishing = self.finishing
             sections = [chunk.reshape(-1).float().numpy() for chunk in all_audio_tensors]
-            final_audio = audio_effects.join_sections(
-                sections, sr, self.section_boundaries[:len(sections)], finishing.paragraph_pause)
+            spans, timing = [], {}
+            joined_audio = audio_effects.join_sections(
+                sections, sr, self.section_boundaries[:len(sections)], finishing.paragraph_pause, spans)
             print(f"Applying finishing touches: {finishing.summary()}")
-            final_audio = audio_effects.apply_finishing(final_audio, sr, finishing)
+            final_audio = audio_effects.apply_finishing(joined_audio, sr, finishing, timing=timing)
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             if self.preview:
                 output_dir = os.path.join(self.output_dir, "previews")
@@ -762,6 +765,15 @@ class AudioGeneratorThread(QThread):
             output_path = audio_effects.save_audio(
                 output_base, final_audio, sr, finishing.output_format)
             print(f"Final stitched audio saved to: {output_path}")
+            if finishing.save_subtitles and not self.preview:
+                try:
+                    cues = subtitles.build_cues(final_chunks[:len(sections)], spans, joined_audio, sr,
+                                                timing.get("scale", 1.0), timing.get("offset", 0.0),
+                                                len(final_audio) / sr)
+                    self.subtitle_path = subtitles.save(output_base, cues, finishing.subtitle_format)
+                    print(f"Subtitles saved to: {self.subtitle_path} ({len(cues)} captions)")
+                except Exception as exc:  # subtitles never cost the audio
+                    print(f"Could not write subtitles: {safe_console_text(exc)}")
             self.generation_complete.emit(output_path, sr)
         except Exception as e:
             if not self._is_stopped:
@@ -1999,12 +2011,17 @@ class ChatterboxApp(QMainWindow):
         self.even_volume_checkbox = QCheckBox("Even out volume")
         self.even_volume_checkbox.setToolTip(
             "Bring every result to a consistent, comfortable loudness without clipping.")
-        self.trim_silence_checkbox = QCheckBox("Trim silence at start and end")
+        self.trim_silence_checkbox = QCheckBox("Trim silence")
         self.trim_silence_checkbox.setToolTip(
             "Remove dead air before the first word and after the last.")
-        finishing_checks.setSpacing(24)
+        finishing_checks.setSpacing(18)
+        self.subtitles_checkbox = QCheckBox("Save subtitles")
+        self.subtitles_checkbox.setToolTip(
+            "Also save captions timed to the audio, next to it (.srt, or .vtt: the format is on the "
+            "Advanced page). Timing comes from the generated sections and the pauses in them.")
         finishing_checks.addWidget(self.even_volume_checkbox)
         finishing_checks.addWidget(self.trim_silence_checkbox)
+        finishing_checks.addWidget(self.subtitles_checkbox)
         finishing_checks.addStretch(1)
         reset_finishing_button = QPushButton("Reset")
         reset_finishing_button.setToolTip(
@@ -2021,6 +2038,7 @@ class ChatterboxApp(QMainWindow):
         self.output_format_combo.currentTextChanged.connect(self.update_finishing_summary)
         self.even_volume_checkbox.toggled.connect(self.update_finishing_summary)
         self.trim_silence_checkbox.toggled.connect(self.update_finishing_summary)
+        self.subtitles_checkbox.toggled.connect(self.update_finishing_summary)
         generate_layout.addWidget(delivery_card)
 
         player_card, player_layout = self._make_card()
@@ -2323,6 +2341,20 @@ class ChatterboxApp(QMainWindow):
         mp3_hint = QLabel("Lossy compression; replaces the WAV/FLAC choice on the Generate page.")
         mp3_hint.setObjectName("Muted")
         export_layout.addWidget(mp3_hint)
+        subtitle_row = QHBoxLayout()
+        subtitle_row.addWidget(QLabel("Subtitle format"))
+        self.subtitle_format_combo = QComboBox()
+        self.subtitle_format_combo.addItems(list(subtitles.FORMATS))
+        self.subtitle_format_combo.setToolTip(
+            "SRT works almost everywhere (video editors, YouTube, VLC). WebVTT is for web players; "
+            "in conversations it tags each caption with the speaker.")
+        self.subtitle_format_combo.currentTextChanged.connect(self.update_finishing_summary)
+        subtitle_row.addWidget(self.subtitle_format_combo)
+        subtitle_row.addStretch(1)
+        export_layout.addLayout(subtitle_row)
+        subtitle_hint = QLabel("Used when Save subtitles is ticked in Finishing touches.")
+        subtitle_hint.setObjectName("Muted")
+        export_layout.addWidget(subtitle_hint)
         advanced_layout.addWidget(export_card)
 
         advanced_actions = QHBoxLayout()
@@ -3080,6 +3112,8 @@ class ChatterboxApp(QMainWindow):
             even_volume=self.even_volume_checkbox.isChecked(),
             trim_silence=self.trim_silence_checkbox.isChecked(),
             output_format="MP3" if self.mp3_checkbox.isChecked() else self.output_format_combo.currentText(),
+            save_subtitles=self.subtitles_checkbox.isChecked(),
+            subtitle_format=self.subtitle_format_combo.currentText(),
         )
 
     def apply_finishing_settings(self, settings):
@@ -3091,6 +3125,8 @@ class ChatterboxApp(QMainWindow):
         self.mp3_checkbox.setChecked(settings.output_format == "MP3")
         if settings.output_format in LOSSLESS_FORMATS:
             self.output_format_combo.setCurrentText(settings.output_format)
+        self.subtitles_checkbox.setChecked(settings.save_subtitles)
+        self.subtitle_format_combo.setCurrentText(settings.subtitle_format)
         self.update_finishing_summary()
 
     def reset_finishing(self):
@@ -3100,6 +3136,7 @@ class ChatterboxApp(QMainWindow):
         self.even_volume_checkbox.setChecked(defaults.even_volume)
         self.trim_silence_checkbox.setChecked(defaults.trim_silence)
         self.output_format_combo.setCurrentText(defaults.output_format)
+        self.subtitles_checkbox.setChecked(defaults.save_subtitles)
         self.update_finishing_summary()
 
     def reset_advanced(self):
@@ -3117,7 +3154,7 @@ class ChatterboxApp(QMainWindow):
         self.update_finishing_summary()
 
     def update_finishing_summary(self, *_args):
-        if not hasattr(self, "mp3_checkbox"):
+        if not hasattr(self, "subtitle_format_combo"):
             return  # Advanced page not built yet
         settings = self.current_finishing_settings()
         summary = settings.summary()
@@ -4367,8 +4404,9 @@ class ChatterboxApp(QMainWindow):
             self.set_status_message(
                 f"Status: Stopped. Saved {done} of {total} sections: {os.path.basename(output_path)}")
         else:
+            captions = f" + {os.path.basename(thread.subtitle_path)}" if thread.subtitle_path else ""
             self.set_status_message(
-                f"Status: Full audio generated: {os.path.basename(output_path)}{total_generation_time_str}")
+                f"Status: Full audio generated: {os.path.basename(output_path)}{captions}{total_generation_time_str}")
 
         self.current_audio_file = output_path
         # ... (rest of the method same as your working version)

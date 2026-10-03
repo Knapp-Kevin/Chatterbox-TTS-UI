@@ -35,6 +35,7 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
   - **Discover on Hugging Face** lists more loadable models for each tab, searched in the background. Click one to add it.
 - **Hugging Face access** section with token **Save** and **Test**. The token is stored locally, never in `models.json`.
 - **Finishing touches:** paragraph pauses, even out volume, trim silence, and WAV/FLAC output.
+- **Subtitles.** Tick **Save subtitles** to get an `.srt` or `.vtt` file next to the audio. Captions are timed from the generated sections and snapped to the pauses in the speech, with no speech recognition needed. Speed changes and trimmed silence are accounted for, and conversation captions name their speaker.
 - **Advanced page:** speed and pitch changes (formant-preserving) and MP3 export, with a note that they can weaken the AI watermark.
 - **Voice library** (the Voice page). Save clip voices, preset voices (Kokoro, Qwen speakers) and designed voices (Qwen, VoxCPM, OmniVoice) by name, with tags and notes, and use any of them with a click. A preset or designed voice can **make a clip**: 15 s reading a phonetic passage with its exact transcript, so cloning models can reuse it. Existing recordings join the library without being moved, and VibeVoice's **Cast…** lists library voices by name.
 
