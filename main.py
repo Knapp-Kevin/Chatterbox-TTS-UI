@@ -273,9 +273,9 @@ RECORDING_SAMPLE_RATE = 48000
 MIN_RECORDING_SECONDS = 3
 MAX_RECORDING_SECONDS = 30
 # Preview lengths offered next to Preview: (label, characters). Speech runs at roughly
-# 15 characters a second.
-PREVIEW_LENGTHS = (("~10 s", 150), ("~20 s", 300), ("~30 s", 450), ("~1 min", 900))
-DEFAULT_PREVIEW_CHARS = 300
+# 15 characters a second; a few seconds is enough to judge a voice.
+PREVIEW_LENGTHS = (("3 s", 45), ("5 s", 75), ("10 s", 150))
+DEFAULT_PREVIEW_CHARS = 75
 
 
 def preview_cut(lengths, budget):
@@ -2385,10 +2385,12 @@ class ChatterboxApp(QMainWindow):
         for label, characters in PREVIEW_LENGTHS:
             self.preview_length_combo.addItem(label, characters)
         saved_length = self.preview_length_combo.findData(self.app_settings.get("preview_chars", DEFAULT_PREVIEW_CHARS))
-        self.preview_length_combo.setCurrentIndex(max(0, saved_length))
+        if saved_length < 0:  # a length from an older version
+            saved_length = self.preview_length_combo.findData(DEFAULT_PREVIEW_CHARS)
+        self.preview_length_combo.setCurrentIndex(saved_length)
         self.preview_length_combo.setToolTip(
-            "How much of the text Preview reads, from the start (whole sections, so it can run a "
-            "little longer). Select text to preview exactly that instead.")
+            "About how long Preview reads: the opening sentence or two of the text (headings "
+            "skipped). Select text to preview exactly that instead.")
         self.preview_length_combo.currentIndexChanged.connect(
             lambda _index: self.app_settings.update(preview_chars=self.preview_length_combo.currentData()))
         self.preview_length_combo.setFixedWidth(84)
@@ -3168,12 +3170,12 @@ class ChatterboxApp(QMainWindow):
             self.on_generation_thread_finished()
 
     def preview_text(self):
-        """(text, character budget): a selection is previewed whole; otherwise the text's
-        opening sections, up to the length picked next to Preview."""
+        """(text, character budget): a selection is previewed whole; otherwise a short
+        excerpt from the start of the text, about the length picked next to Preview."""
         selected = self.text_input.textCursor().selectedText().replace("\u2029", "\n").strip()
         if selected:
             return selected, None
-        return self.text_input.toPlainText().strip(), self.preview_length_combo.currentData()
+        return documents.excerpt(self.text_input.toPlainText(), self.preview_length_combo.currentData()), None
 
     def start_generation(self, preview=False):
         if self.is_generating:

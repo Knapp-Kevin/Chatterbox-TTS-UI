@@ -86,7 +86,7 @@ Windows remains the primary maintained path.
     *   **Your Google Docs:** sign in with Google to search and open your own docs, including private ones. Access is read-only, your sign-in stays on this PC (`google_auth.json`), and **Sign out** revokes it. Signing in needs a one-time setup; see [Google Docs sign-in setup](#google-docs-sign-in-setup).
 *   **A live summary** under the text, for example "About 1 min 40 s · 4 sections · 553 characters". It updates as you edit, even during a render. Click the estimate to compare every model's time for the current text and switch to one.
 *   **Estimates are learned per model** from your own runs, so they get more accurate with use.
-*   **Preview** generates your selection, or the opening of the text: pick about **10 s, 20 s, 30 s or 1 min** next to it. **Keep this take** locks the preview's take number, so the full render matches.
+*   **Preview** generates your selection, or the opening of the text: pick about **3, 5 or 10 seconds** next to it (whole sentences where they fit; headings are skipped). **Keep this take** locks the preview's take number, so the full render matches.
 *   **Keep this voice** appears after previewing with a voice design model. It saves the voice you just heard to the voice library as a designed voice with its clip, and locks it in: the full render, and any later render, use exactly that voice. Using a saved designed voice from the library locks it the same way. Change the description to design a new one.
 *   **Progress** shows the sections being generated and the time remaining, for example "9–16/18 · 0:41 left".
 *   **Stop keeps your work.** Finished sections are saved as a `_partial` file.

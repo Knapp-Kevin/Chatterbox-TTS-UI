@@ -182,6 +182,55 @@ def plan_script_sections(text, max_len):
     return sections
 
 
+DANGLING_WORDS = {"a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for", "with",
+                  "from", "by", "that", "which", "who", "whether", "is", "was", "as", "so", "if"}
+
+
+def excerpt(text, max_chars):
+    """The opening of text, about max_chars long: whole sentences when they fit, else
+    the first sentence cut at a clause break or between words. A conversation script
+    keeps its "Name:" prefix."""
+    text = text.strip()
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    match = SPEAKER_LINE.match(first_line)
+    if match:
+        turns = parse_script(text)
+        if turns:
+            speaker, words = turns[0]
+            return f"{speaker}: {excerpt(words, max(20, max_chars - len(speaker) - 2))}"
+    paragraphs = split_paragraphs(text)
+    if not paragraphs:
+        return ""
+    sentences = []
+    for index, paragraph in enumerate(paragraphs):
+        if is_heading(paragraph, index < len(paragraphs) - 1) and index < len(paragraphs) - 1:
+            continue  # a heading says little about the voice: preview the prose after it
+        else:
+            sentences.extend(s.strip() for s in nltk.sent_tokenize(paragraph) if s.strip())
+        if sum(len(item) + 1 for item in sentences) > max_chars * 2:
+            break
+    taken = ""
+    for sentence in sentences:
+        candidate = f"{taken} {sentence}".strip()
+        if taken and len(candidate) > max_chars:
+            break
+        taken = candidate
+        if len(taken) >= max_chars:
+            break
+    if len(taken) <= max_chars * 1.3:
+        return taken
+    # One long sentence: stop at the last clause break, else word boundary, before the limit.
+    limit = int(max_chars * 1.15)
+    for pattern in CLAUSE_BREAKS:
+        cuts = [m.start() for m in pattern.finditer(taken[:limit]) if m.start() >= max_chars * 0.5]
+        if cuts:
+            return taken[:cuts[-1]].rstrip(" ,;:—–-") + "."
+    words = taken[:limit].split()[:-1] or taken[:limit].split()
+    while len(words) > 1 and words[-1].lower().strip(",;:") in DANGLING_WORDS:
+        words.pop()  # don't end on "and", "the", "of"...
+    return " ".join(words).rstrip(" ,;:") + "."
+
+
 def plan_batches(lengths, max_count, char_budget=None):
     """Group consecutive sections into batches of at most max_count sections, and,
     when char_budget is set, at most char_budget characters counted as
