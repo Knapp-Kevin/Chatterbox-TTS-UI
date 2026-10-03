@@ -6,10 +6,6 @@
 > **All the good names were taken.**  
 > **A name was apparently required, so here we are.**
 
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-1-orange.svg?style=flat-square)](#contributors-)
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
-
 **This Voice Thing** is a Windows-first, local-first desktop app for working with voice AI models.
 
 It started as a fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI), which itself provides a UI around Resemble AI's open-source [Chatterbox TTS](https://github.com/resemble-ai/chatterbox). Then we kept building things into it. And building. And building. At some point it stopped being particularly reasonable to keep calling the whole application “Chatterbox UI.”
@@ -379,7 +375,14 @@ this-voice-thing/
 │  ├─ app.py                    start-up wrapper and crash logging
 │  ├─ paths.py                  where code and data live
 │  ├─ ui/
-│  │  ├─ main_window.py         the window, pages, dialogs and generation thread
+│  │  ├─ main_window.py         the window: sidebar, page layout, settings (run as __main__)
+│  │  ├─ pages/                 one module per page, mixed into the window:
+│  │  │                         generate, engine_controls, player, voice, transcribe, models, advanced
+│  │  ├─ dialogs/               recording, find/add models, voices and cast, pronunciation, Google Docs
+│  │  ├─ threads.py             model loading, generation, installs, speech and transcription threads
+│  │  ├─ api_bridge.py          hands local API requests to the window
+│  │  ├─ common.py              start-up setup, model config and shared constants
+│  │  ├─ widgets.py             small reusable widgets
 │  │  ├─ theme.py               light/dark theme and its semantic colour tokens
 │  │  └─ tiles.py               model and voice tiles
 │  ├─ engines/
