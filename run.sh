@@ -2,7 +2,7 @@
 set -euo pipefail
 
 VENV_DIR=".venv"
-SCRIPT_NAME="launch_app.py"
+SCRIPT_NAME="main.py"
 PYTHON_GUI_EXE="$VENV_DIR/bin/python3"
 PYTHON_CONSOLE_EXE="$VENV_DIR/bin/python"
 

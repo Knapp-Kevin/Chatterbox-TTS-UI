@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import nltk
 import numpy as np
 
-import documents
+from this_voice_thing.core import documents
 
 FORMATS = {"SRT": "srt", "WebVTT": "vtt"}
 LINE_CHARS = 42            # per line; two lines per caption

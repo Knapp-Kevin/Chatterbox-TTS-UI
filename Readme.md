@@ -1,5 +1,7 @@
 # This Voice Thing
 
+![This Voice Thing](assets/branding/this-voice-thing-banner.jpg)
+
 > **Definitely not Chatterbox.**  
 > **All the good names were taken.**  
 > **A name was apparently required, so here we are.**
@@ -30,7 +32,7 @@ The application currently supports:
 Text, recordings, generated audio, saved voices and model configuration stay on your machine unless you explicitly use a feature that talks to an external service, such as Hugging Face discovery/downloads or Google Docs import.
 
 > [!NOTE]
-> The GitHub repository is still named `Chatterbox-TTS-UI` for the moment. That is intentional until the repository itself is renamed. The application is now **This Voice Thing**; Chatterbox is one of the supported engines and the project this fork originally grew from.
+> The repository was renamed from `Knapp-Kevin/Chatterbox-TTS-UI` to `Knapp-Kevin/this-voice-thing`; GitHub redirects the old URLs, so existing clones keep working. The application is **This Voice Thing**; Chatterbox is one of the supported engines and the project this fork originally grew from. Runtime folders such as `chatterbox_outputs/` keep their names so existing files and scripts aren't stranded.
 
 See [CHANGELOG.md](CHANGELOG.md) for the long version of how this got out of hand.
 
@@ -257,14 +259,11 @@ The Model page provides more relevant guidance against the current machine.
 
 ## Installation & Usage
 
-> [!IMPORTANT]
-> Until the GitHub repository itself is renamed, the clone URL and directory below intentionally retain `Chatterbox-TTS-UI`.
-
 1. Clone or download this repository:
 
    ```bash
-   git clone https://github.com/Knapp-Kevin/Chatterbox-TTS-UI
-   cd Chatterbox-TTS-UI
+   git clone https://github.com/Knapp-Kevin/this-voice-thing
+   cd this-voice-thing
    ```
 
 2. On Windows, double-click `run.bat`.
@@ -300,7 +299,7 @@ Then:
 
 ```bash
 uv pip sync requirements.lock.txt
-python install_torch.py
+python scripts/install_torch.py
 python main.py
 ```
 
@@ -308,31 +307,42 @@ Optional engines install into their own `engines/<name>/.venv` environments from
 
 ## Project Structure
 
-Key files and directories:
+```
+this-voice-thing/
+├─ main.py                      start here: `python main.py` (run.bat / run.sh call it)
+├─ run.bat, setup_env.bat       Windows launcher and setup (maintained)
+├─ run.sh, setup_env.sh         macOS/Linux launcher and setup (best effort)
+├─ this_voice_thing/            the application package
+│  ├─ app.py                    start-up wrapper and crash logging
+│  ├─ paths.py                  where code and data live
+│  ├─ ui/
+│  │  ├─ main_window.py         the window, pages, dialogs and generation thread
+│  │  ├─ theme.py               light/dark theme and its semantic colour tokens
+│  │  └─ tiles.py               model and voice tiles
+│  ├─ engines/
+│  │  ├─ chatterbox_backend.py  Chatterbox, loaded in-process
+│  │  ├─ worker.py              shared worker/environment support for the other engines
+│  │  └─ qwen.py, kokoro.py, voxcpm.py, omnivoice.py, vibevoice.py
+│  ├─ core/
+│  │  ├─ model_registry.py      engines, capabilities, licenses, hardware needs, Hugging Face discovery
+│  │  ├─ documents.py           document loading, sectioning, conversation scripts
+│  │  ├─ audio_effects.py       joining, finishing, speed/pitch, export
+│  │  ├─ subtitles.py           SRT/WebVTT from the render timeline
+│  │  ├─ pronunciation.py       pronunciation dictionary
+│  │  └─ voice_library.py       saved clip, preset and designed voices
+│  └─ integrations/
+│     ├─ local_api.py           local OpenAI-compatible and native HTTP API
+│     └─ google_docs.py         Google Docs import and sign-in
+├─ engines/<name>/              engine worker scripts, plus their own .venv once installed
+├─ scripts/install_torch.py     picks a PyTorch build for your hardware (run by setup)
+├─ tests/                       automated tests (`python -m unittest discover tests`)
+├─ assets/                      icons and branding (assets/branding/)
+├─ docs/screenshots/            README screenshots
+├─ models.json                  the model list
+└─ requirements.in, requirements.lock.txt, uv.toml
+```
 
-- `main.py`: PySide6 application and primary UI flow.
-- `run.bat` / `setup_env.bat`: maintained Windows launcher/setup.
-- `run.sh` / `setup_env.sh`: best-effort macOS/Linux launcher/setup.
-- `launch_app.py`: startup wrapper and crash logging.
-- `install_torch.py`: hardware detection and PyTorch selection.
-- `model_backends.py`: Chatterbox model loading.
-- `model_registry.py`: engine/model definitions, capabilities, licensing, download state and Hugging Face discovery.
-- `model_tiles.py`: reusable model/voice tile UI.
-- `voice_library.py`: reusable clip, preset and designed voices.
-- `engine_worker.py`: shared process/environment support for optional engines.
-- `qwen_engine.py`, `voxcpm_engine.py`, `omnivoice_engine.py`, `vibevoice_engine.py`, `kokoro_engine.py`: optional engine integrations.
-- `documents.py`: document loading, sectioning, conversations and batch planning.
-- `audio_effects.py`: joining, finishing, speed/pitch and export.
-- `subtitles.py`: SRT/WebVTT generation from the render timeline.
-- `pronunciation.py`: pronunciation dictionary.
-- `local_api.py`: local OpenAI-compatible/native HTTP API.
-- `google_docs.py`: Google Docs import and OAuth.
-- `ui_theme.py` / `assets/`: theming, icons and visual assets.
-- `models.json`: configured model list.
-- `requirements.in` / `requirements.lock.txt`: application dependencies.
-- `docs/screenshots/`: README screenshots.
-
-Runtime-created data includes `.venv/`, engine environments, generated audio, recordings, voice-library data, pronunciation settings, Google auth, logs and application settings.
+Your data stays in the project folder, where it has always been: `app_settings.json`, `models.json`, `chatterbox_outputs/`, `reference_recordings/`, `voice_library/`, `pronunciations.json`, `google_auth.json`, `logs/`, `.venv/` and each engine's `engines/<name>/.venv/`. Those names are kept for compatibility even though the app is now This Voice Thing.
 
 ## Troubleshooting
 
@@ -352,7 +362,7 @@ A few common failures:
 The project uses two deliberately separate mechanisms:
 
 1. `requirements.lock.txt` keeps the main application's Python dependencies pinned.
-2. `install_torch.py` selects a PyTorch runtime appropriate for the machine instead of pretending one wheel can sensibly serve every NVIDIA generation and CPU-only installation.
+2. `scripts/install_torch.py` selects a PyTorch runtime appropriate for the machine instead of pretending one wheel can sensibly serve every NVIDIA generation and CPU-only installation.
 
 Optional engines use isolated environments where their dependencies conflict with the main application or each other. This costs disk space but avoids turning the primary environment into dependency soup.
 

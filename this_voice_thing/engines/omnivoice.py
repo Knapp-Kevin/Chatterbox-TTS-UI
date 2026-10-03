@@ -18,7 +18,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-import engine_worker
+from this_voice_thing.engines import worker as engine_worker
 
 NAME = "omnivoice"
 PYTHON = engine_worker.venv_python(NAME)

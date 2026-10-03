@@ -5,10 +5,11 @@ import runpy
 import sys
 import traceback
 
+from this_voice_thing import paths
+
 
 def make_startup_log_path():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    logs_dir = os.path.join(base_dir, "logs")
+    logs_dir = paths.LOGS_DIR
     os.makedirs(logs_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(logs_dir, f"app_startup_{timestamp}.log")
@@ -50,13 +51,13 @@ class TeeFile:
 
 def show_startup_error(log_path, exc_text):
     message = (
-        "Chatterbox TTS UI failed to start.\n\n"
+        "This Voice Thing failed to start.\n\n"
         f"Log file:\n{log_path}\n\n"
         "Last error:\n"
         f"{exc_text}"
     )
     try:
-        ctypes.windll.user32.MessageBoxW(0, message, "Chatterbox TTS UI Startup Error", 0x10)
+        ctypes.windll.user32.MessageBoxW(0, message, "This Voice Thing: Startup Error", 0x10)
     except Exception:
         pass
 
@@ -66,12 +67,12 @@ def main():
         sys.stdout = TeeFile(sys.__stdout__, log_handle)
         sys.stderr = TeeFile(sys.__stderr__, log_handle)
 
-        print(f"Launching main.py at {datetime.datetime.now().isoformat()}")
+        print(f"Launching This Voice Thing at {datetime.datetime.now().isoformat()}")
         print(f"Python executable: {sys.executable}")
         print(f"Working directory: {os.getcwd()}")
 
         try:
-            runpy.run_path(os.path.join(os.path.dirname(__file__), "main.py"), run_name="__main__")
+            runpy.run_module("this_voice_thing.ui.main_window", run_name="__main__", alter_sys=True)
         except Exception:
             tb = traceback.format_exc()
             print(tb)

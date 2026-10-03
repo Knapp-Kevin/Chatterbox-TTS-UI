@@ -13,7 +13,9 @@ import threading
 
 import numpy as np
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from this_voice_thing import paths
+
+BASE_DIR = paths.ROOT  # engines/<name>/ live in the project folder
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_PACKAGES = ["torch==2.8.0", "torchaudio==2.8.0"]
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)

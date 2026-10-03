@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-import model_registry
+from this_voice_thing.core import model_registry
 
 TILE_WIDTH = 220
 TILE_SPACING = 10

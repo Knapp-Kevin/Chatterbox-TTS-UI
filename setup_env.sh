@@ -49,10 +49,10 @@ build_runtime_lock() {
     grep -Ev '^(torch|torchaudio|torchvision)==' "$REQUIREMENTS_LOCK_FILE" > "$RUNTIME_LOCK_FILE"
 }
 
-log_message "=== Starting Chatterbox TTS Installer ==="
+log_message "=== Starting This Voice Thing Installer ==="
 log_message "Dry Run Mode: $UV_APP_DRY"
 echo
-echo "=== Starting Chatterbox TTS Installer ==="
+echo "=== Starting This Voice Thing Installer ==="
 echo
 echo "Installer log: $LOG_FILE"
 
@@ -138,7 +138,7 @@ if [ "$UV_APP_DRY" = "0" ]; then
         rm -f "$TORCH_STAMP"
         NEED_TORCH_INSTALL=1
     fi
-    if [ -f install_torch.py ] && is_newer_than install_torch.py "$TORCH_STAMP"; then
+    if [ -f scripts/install_torch.py ] && is_newer_than scripts/install_torch.py "$TORCH_STAMP"; then
         NEED_TORCH_INSTALL=1
     fi
     if is_newer_than "$REQUIREMENTS_LOCK_FILE" "$TORCH_STAMP"; then
@@ -147,7 +147,7 @@ if [ "$UV_APP_DRY" = "0" ]; then
 
     if [ "$NEED_TORCH_INSTALL" -eq 1 ]; then
         log_message "Running install_torch.py."
-        "$PYTHON_CONSOLE_EXE" install_torch.py >> "$LOG_FILE" 2>&1
+        "$PYTHON_CONSOLE_EXE" scripts/install_torch.py >> "$LOG_FILE" 2>&1
         printf 'PyTorch checked by install_torch.py\n' > "$TORCH_STAMP"
     else
         log_message "PyTorch already checked."

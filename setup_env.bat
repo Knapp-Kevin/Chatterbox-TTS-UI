@@ -20,10 +20,10 @@ set LOG_FILE=%LOG_DIR%\installer_%LOG_TIMESTAMP%.log
 set CHATTERBOX_INSTALL_LOG=%CD%\%LOG_FILE%
 
 echo.
-echo === Starting Chatterbox TTS Installer ===
+echo === Starting This Voice Thing Installer ===
 echo.
 echo Installer log: %LOG_FILE%
-call :LOG_MESSAGE "=== Starting Chatterbox TTS Installer ==="
+call :LOG_MESSAGE "=== Starting This Voice Thing Installer ==="
 call :LOG_MESSAGE "Dry Run Mode: %UV_APP_DRY%"
 
 where python >nul
@@ -138,13 +138,13 @@ if "%UV_APP_DRY%"=="0" (
         if exist "%TORCH_STAMP%" del /q "%TORCH_STAMP%"
         set NEED_TORCH_INSTALL=1
     )
-    if exist install_torch.py call :SET_NEWER_FLAG "install_torch.py" "%TORCH_STAMP%" NEED_TORCH_INSTALL
+    if exist scripts\install_torch.py call :SET_NEWER_FLAG "scripts\install_torch.py" "%TORCH_STAMP%" NEED_TORCH_INSTALL
     if exist "%REQUIREMENTS_LOCK_FILE%" call :SET_NEWER_FLAG "%REQUIREMENTS_LOCK_FILE%" "%TORCH_STAMP%" NEED_TORCH_INSTALL
 
     if "!NEED_TORCH_INSTALL!"=="1" (
         echo Installing PyTorch...
         call :LOG_MESSAGE "Running install_torch.py because Torch is not stamped or inputs changed."
-        "%PYTHON_CONSOLE_EXE%" install_torch.py
+        "%PYTHON_CONSOLE_EXE%" scripts\install_torch.py
         if !ERRORLEVEL! neq 0 (
             call :LOG_MESSAGE "WARNING: install_torch.py failed."
             echo WARNING: PyTorch install failed. App may lack GPU support.

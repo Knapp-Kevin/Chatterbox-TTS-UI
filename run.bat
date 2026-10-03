@@ -2,7 +2,7 @@
 setlocal
 
 set VENV_DIR=.venv
-set SCRIPT_NAME=launch_app.py
+set SCRIPT_NAME=main.py
 set PYTHON_GUI_EXE=%VENV_DIR%\Scripts\pythonw.exe
 set PYTHON_CONSOLE_EXE=%VENV_DIR%\Scripts\python.exe
 

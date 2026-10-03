@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import asdict, dataclass
 
-import documents
+from this_voice_thing.core import documents
 
 FILENAME = "pronunciations.json"
 

@@ -1,6 +1,6 @@
-# Contributing to Chatterbox TTS - UI
+# Contributing to This Voice Thing
 
-First off, thank you for considering contributing to the "Chatterbox TTS - UI" project! We appreciate any help, whether it's reporting a bug, suggesting a feature, or submitting code changes.
+First off, thank you for considering contributing to This Voice Thing (formerly a Chatterbox TTS UI fork)! We appreciate any help, whether it's reporting a bug, suggesting a feature, or submitting code changes.
 
 This document provides some guidelines to help make the contribution process smooth and effective for everyone.
 
@@ -33,22 +33,28 @@ There are several ways you can contribute:
 If you're looking to contribute code, here's a quick guide to setting up your development environment:
 
 1.  **Prerequisites:** Ensure you have Python (3.11 recommended), `uv`, and FFmpeg installed as described in the main `README.md`.
-2.  **Fork & Clone:** Fork the repository on GitHub and then clone your fork locally:
+2.  **Fork & Clone:** Fork [Knapp-Kevin/this-voice-thing](https://github.com/Knapp-Kevin/this-voice-thing) on GitHub, then clone your fork (replace `YOUR-NAME`):
     ```bash
-    git clone https://github.com/AcTePuKc/Chatterbox-TTS-UI.git
-    cd Chatterbox-TTS-UI
+    git clone https://github.com/YOUR-NAME/this-voice-thing.git
+    cd this-voice-thing
     ```
-3.  **Set up Upstream Remote (Optional but Recommended):**
+3.  **Set up the Upstream Remote (optional but recommended):**
     ```bash
-    git remote add upstream https://github.com/AcTePuKc/Chatterbox-TTS-UI.git 
+    git remote add upstream https://github.com/Knapp-Kevin/this-voice-thing.git
     ```
-    This allows you to easily pull changes from the main repository.
+    This lets you pull changes from the main repository. (The repository used to be called
+    `Knapp-Kevin/Chatterbox-TTS-UI`; GitHub redirects the old URLs.) This Voice Thing began as a
+    fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI); fixes that
+    belong in that original UI are best offered there too.
 4.  **Create Virtual Environment & Install Dependencies:**
-    It's highly recommended to use the `run.bat` (Windows) or `run.sh` (macOS/Linux) script for the initial setup as it handles `uv venv`, `uv pip sync requirements.lock.txt`, and `python install_torch.py`.
+    It's highly recommended to use the `run.bat` (Windows) or `run.sh` (macOS/Linux) script for the initial setup as it handles `uv venv`, `uv pip sync requirements.lock.txt`, and `python scripts/install_torch.py`.
     Alternatively, follow the manual installation steps in the `README.md`.
 5.  **Make Your Changes:** Create a new branch and start coding!
-6.  **Testing:** Run the application (`python main.py`) to test your changes.
-7.  **Where things live:** `main.py` holds the UI and generation thread; engine, model-list and Hugging Face logic is in `model_registry.py`; document splitting in `documents.py`; audio processing in `audio_effects.py`; the theme in `ui_theme.py`. The README's Project Structure section lists everything.
+6.  **Testing:** Run the application (`python main.py`) to test your changes, and run the tests:
+    `.venv\Scripts\python.exe -m unittest discover tests`. The theme tests check contrast, colour
+    meaning (amber = warning, red = error, green = success) and that widgets use theme tokens
+    rather than hard-coded colours.
+7.  **Where things live:** the app is the `this_voice_thing` package. The window, pages, dialogs and generation thread are in `ui/main_window.py`, the theme in `ui/theme.py`; engines in `engines/`; the model list, Hugging Face logic, documents, audio, subtitles, pronunciation and voice library in `core/`; the local API and Google Docs in `integrations/`. App data (settings, outputs, recordings) stays in the project folder; see `this_voice_thing/paths.py`. The README's Project Structure section shows the whole tree.
 8.  **Qwen engine:** Qwen3-TTS runs in its own environment, `engines/qwen/.venv`, through `engines/qwen/qwen_worker.py`. Never install `qwen-tts` into the main `.venv`: it needs `transformers` 4.57.x, while Chatterbox pins 5.2.0. To work on the worker, run Python from `engines/qwen/.venv`.
 
 ## Code of Conduct
@@ -61,4 +67,4 @@ If you have questions about contributing or need clarification, feel free to ope
 
 ---
 
-Thank you for your interest in improving Chatterbox TTS - UI!
+Thank you for your interest in improving This Voice Thing!

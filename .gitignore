@@ -44,7 +44,7 @@ htmlcov/
 chatterbox_outputs/
 
 # Test scripts matching the pattern 'test*.py'
-test*.py
+/test*.py
 # Temporary files
 *.tmp
 # PyInstaller (if you ever use it for packaging)
@@ -64,10 +64,9 @@ test_audio.txt
 requirements.lock_3.9.txt
 app_settings.json
 
-# Local screenshots: keep screenshot_1.png as the intentional README image,
+# Local screenshots (README images live in docs/screenshots/),
 # ignore extra captures used during iteration.
 screenshot_*.png
-!screenshot_1.png
 
 # Microphone recordings made with the in-app Record button
 reference_recordings/

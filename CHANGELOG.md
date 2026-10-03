@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to this fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI) are listed here.
+All notable changes to **This Voice Thing**, which began as a fork of [AcTePuKc/Chatterbox-TTS-UI](https://github.com/AcTePuKc/Chatterbox-TTS-UI), are listed here.
 
 ## [Unreleased] - 2026-10-02
 
@@ -45,6 +45,9 @@ Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell laun
 - **Voice library** (the Voice page). Save clip voices, preset voices (Kokoro, Qwen speakers) and designed voices (Qwen, VoxCPM, OmniVoice) by name, with tags and notes, and use any of them with a click. A preset or designed voice can **make a clip**: 15 s reading a phonetic passage with its exact transcript, so cloning models can reuse it. Existing recordings join the library without being moved, and VibeVoice's **Cast…** lists library voices by name.
 
 ### Changed
+- **Organised code.** The 20-odd modules that sat in the project folder now live in a `this_voice_thing` package (`ui/`, `engines/`, `core/`, `integrations/`), with `install_torch.py` in `scripts/` and automated tests in `tests/`. `python main.py`, `run.bat` and `run.sh` work as before, and app data (settings, model list, outputs, recordings, voice library, engine environments) stays where it was.
+- **New look for This Voice Thing.** A cyan / electric-blue / purple / pink identity on deep navy (dark) or light neutral surfaces (light), built on semantic theme tokens. Cyan marks actions, selection and focus; the brand gradient appears only on progress bars, the recording waveform and a thin sidebar stroke. Amber is now reserved for warnings and caution (uncertain licenses, tight hardware, setup needed), red for errors, green for success. Keyboard focus is visible everywhere, and text meets WCAG AA contrast in both themes.
+- **Renamed to This Voice Thing.** The app had outgrown "Chatterbox UI"; Chatterbox remains one of its engines. Runtime names are unchanged for compatibility: outputs still go to `chatterbox_outputs/` as `chatterbox_….wav` (renaming those is a planned migration).
 - **The shipped model list only holds models you can actually download.** The placeholder "Example custom…" entries and the "Legacy English compatibility" entry are gone; add an original-layout model with **+ Add repo…** if you need one. Each shipped model's download size is shown on its tile before you load it.
 - **New interface:**
   - Sidebar pages (Generate, Voice, Model, Advanced, Log).

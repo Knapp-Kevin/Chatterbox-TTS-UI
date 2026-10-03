@@ -71,7 +71,7 @@ class LocalApiServer:
 
 class _Handler(BaseHTTPRequestHandler):
     api = None  # set per server
-    server_version = "LocalTTS/1.0"
+    server_version = "ThisVoiceThing/1.0"
 
     # --- plumbing ---
 
