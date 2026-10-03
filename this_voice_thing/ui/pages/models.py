@@ -5,40 +5,41 @@ import math
 import os
 
 import torch
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QPalette
-from PySide6.QtWidgets import (
-    QApplication,
-    QDoubleSpinBox,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QMessageBox,
-    QPushButton,
-    QSizePolicy,
-    QTabBar,
-    QWidget,
-)
+from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QFont
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QDoubleSpinBox
+from PySide6.QtWidgets import QGridLayout
+from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QTabBar
+from PySide6.QtWidgets import QWidget
 
 from this_voice_thing.core import model_registry
-from this_voice_thing.ui import theme as ui_theme, tiles as model_tiles
-from this_voice_thing.ui.common import (
-    BACKEND_MULTILINGUAL,
-    CHATTERBOX_AVAILABLE,
-    DEFAULT_MODEL_REPO,
-    DEFAULT_MULTILINGUAL_T3_MODEL,
-    DUAL_MODE_BACKENDS,
-    DUAL_MODE_TYPES,
-    ENGINE_INSTALL_NOTES,
-    ENGINE_MODULES,
-    load_models_config,
-    MODEL_CONFIG_FILENAME,
-    WORKER_MODEL_TYPES,
-)
+from this_voice_thing.ui import tiles as model_tiles
+from this_voice_thing.ui import theme as ui_theme
+from this_voice_thing.ui.common import BACKEND_MULTILINGUAL
+from this_voice_thing.ui.common import CHATTERBOX_AVAILABLE
+from this_voice_thing.ui.common import DEFAULT_MODEL_REPO
+from this_voice_thing.ui.common import DEFAULT_MULTILINGUAL_T3_MODEL
+from this_voice_thing.ui.common import DUAL_MODE_BACKENDS
+from this_voice_thing.ui.common import DUAL_MODE_TYPES
+from this_voice_thing.ui.common import ENGINE_INSTALL_NOTES
+from this_voice_thing.ui.common import ENGINE_MODULES
+from this_voice_thing.ui.common import MODEL_CONFIG_FILENAME
+from this_voice_thing.ui.common import WORKER_MODEL_TYPES
+from this_voice_thing.ui.common import load_models_config
 from this_voice_thing.ui.dialogs.models import ModelEntryDialog
-from this_voice_thing.ui.threads import EngineInstallThread, ModelLoaderThread
+from this_voice_thing.ui.threads import EngineInstallThread
+from this_voice_thing.ui.threads import ModelLoaderThread
 from this_voice_thing.ui.widgets import dialog_accepted
 
 
@@ -788,3 +789,29 @@ class ModelPage:
         self.set_model_loading_state(False)
         self.refresh_models_page()
         QMessageBox.critical(self, "Model Load Error", error_msg)
+
+    def on_tuning_changed(self, *_args):
+        self.repetition_penalty = self.repetition_spin.value()
+        self.min_p = self.min_p_spin.value()
+        self.top_p = self.top_p_spin.value()
+        self.app_settings["sampling"] = {
+            "repetition_penalty": self.repetition_penalty, "min_p": self.min_p, "top_p": self.top_p}
+        defaults = (abs(self.repetition_penalty - 1.2) < 1e-9 and abs(self.min_p - 0.05) < 1e-9
+                    and abs(self.top_p - 1.0) < 1e-9)
+        self.tuning_summary_label.setText("defaults" if defaults else
+                                          f"repetition {self.repetition_penalty:.2f}, "
+                                          f"min-p {self.min_p:.2f}, top-p {self.top_p:.2f}")
+
+    def reset_tuning(self):
+        self.repetition_spin.setValue(1.2)
+        self.min_p_spin.setValue(0.05)
+        self.top_p_spin.setValue(1.0)
+
+    def set_tuning_expanded(self, expanded):
+        self.tuning_panel.setVisible(expanded)
+        arrow = "\u25be" if expanded else "\u25b8"
+        self.tuning_toggle.setText(f"{arrow} Fine-tuning")
+        self.app_settings["tuning_expanded"] = expanded
+        self.on_tuning_changed()
+        if self.isVisible():
+            self.update_minimum_size()

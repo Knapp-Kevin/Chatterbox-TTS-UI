@@ -2,15 +2,73 @@
 
 import os
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QCheckBox
+from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QListWidget
+from PySide6.QtWidgets import QListWidgetItem
+from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QSlider
 
 from this_voice_thing.core import audio_effects
 
 
 class Player:
     """The output list and audio player under the Generate page. Mixed into ChatterboxApp."""
+
+    def _build_player_card(self):
+        player_card, player_layout = self._make_card()
+        player_header = QHBoxLayout()
+        player_title = QLabel("Player")
+        player_title.setObjectName("CardTitle")
+        player_header.addWidget(player_title)
+        player_header.addSpacing(12)
+        self.autoplay_checkbox = QCheckBox("Auto-play results")
+        self.autoplay_checkbox.setChecked(True)
+        player_header.addWidget(self.autoplay_checkbox)
+        player_header.addStretch(1)
+        self.current_file_label = QLabel("Currently playing: None")
+        self.current_file_label.setObjectName("Muted")
+        player_header.addWidget(self.current_file_label)
+        player_layout.addLayout(player_header)
+        player_controls_layout = QHBoxLayout()
+        self.play_pause_button = QPushButton("Play")
+        self.play_pause_button.clicked.connect(self.toggle_play_pause)
+        self.play_pause_button.setEnabled(False)
+        self.play_pause_button.setMinimumWidth(80)
+        player_controls_layout.addWidget(self.play_pause_button)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.stop_audio)
+        self.stop_button.setEnabled(False)
+        self.stop_button.setMinimumWidth(80)
+        player_controls_layout.addWidget(self.stop_button)
+        self.current_time_label = QLabel("00:00")
+        self.playhead_slider = QSlider(Qt.Orientation.Horizontal)
+        self.playhead_slider.sliderPressed.connect(self.slider_pressed)
+        self.playhead_slider.sliderMoved.connect(self.seek_audio_on_move)
+        self.playhead_slider.sliderReleased.connect(self.slider_released)
+        self.playhead_slider.setEnabled(False)
+        self.duration_label = QLabel("00:00")
+        player_controls_layout.addSpacing(8)
+        player_controls_layout.addWidget(self.current_time_label)
+        player_controls_layout.addWidget(self.playhead_slider, 1)
+        player_controls_layout.addWidget(self.duration_label)
+        player_layout.addLayout(player_controls_layout)
+        history_label = QLabel("Generated files (double-click to play)")
+        history_label.setObjectName("Muted")
+        player_layout.addWidget(history_label)
+        self.output_log_listwidget = QListWidget()
+        self.output_log_listwidget.itemDoubleClicked.connect(
+            self.play_selected_from_log)
+        self.output_log_listwidget.setMinimumHeight(70)
+        self.output_log_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        player_layout.addWidget(self.output_log_listwidget, 1)
+        return player_card
 
     def update_output_log(self):
         self.output_log_listwidget.clear()

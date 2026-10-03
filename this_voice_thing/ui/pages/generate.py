@@ -1,59 +1,49 @@
-"""The Generate page: text, documents, estimates, generation and finishing."""
+"""The Generate page: the text, delivery and player cards, and running a generation."""
 
 import os
-import tempfile
 import time
 
 import numpy as np
-import torch
-from PySide6.QtCore import Qt, QTime, QUrl
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QFileDialog,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QMenu,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QSizePolicy,
-    QSlider,
-    QSpinBox,
-    QTextEdit,
-    QWidget,
-)
+from PySide6.QtCore import QTime
+from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QGridLayout
+from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QSpinBox
+from PySide6.QtWidgets import QTextEdit
+from PySide6.QtWidgets import QWidget
 
-from this_voice_thing.core import audio_effects, documents, model_registry, voice_library
-from this_voice_thing.engines import omnivoice as omnivoice_engine, vibevoice as vibevoice_engine
+from this_voice_thing.core import documents
+from this_voice_thing.core import model_registry
+from this_voice_thing.core import voice_library
 from this_voice_thing.ui import theme as ui_theme
-from this_voice_thing.ui.common import (
-    BACKEND_MULTILINGUAL,
-    BATCH_COST_SLOPE,
-    DEFAULT_LANGUAGE_TEST_TEXTS,
-    DEFAULT_PREVIEW_CHARS,
-    DEFAULT_SECONDS_PER_CHAR,
-    DUAL_MODE_BACKENDS,
-    ENGINE_MODULES,
-    KOKORO_BACKEND,
-    languages_for_backend,
-    LOSSLESS_FORMATS,
-    MAX_TEXT_INPUT_LENGTH,
-    preview_cut,
-    PREVIEW_LENGTHS,
-    QWEN_BACKEND,
-    VIBEVOICE_BACKEND,
-)
-from this_voice_thing.ui.dialogs.google_docs import GoogleDocsDialog
+from this_voice_thing.ui.common import BACKEND_MULTILINGUAL
+from this_voice_thing.ui.common import DEFAULT_LANGUAGE_TEST_TEXTS
+from this_voice_thing.ui.common import DEFAULT_PREVIEW_CHARS
+from this_voice_thing.ui.common import DUAL_MODE_BACKENDS
+from this_voice_thing.ui.common import KOKORO_BACKEND
+from this_voice_thing.ui.common import PREVIEW_LENGTHS
+from this_voice_thing.ui.common import QWEN_BACKEND
+from this_voice_thing.ui.common import VIBEVOICE_BACKEND
+from this_voice_thing.ui.common import languages_for_backend
+from this_voice_thing.ui.common import preview_cut
 from this_voice_thing.ui.dialogs.voices import VoiceDetailsDialog
 from this_voice_thing.ui.threads import AudioGeneratorThread
-from this_voice_thing.ui.widgets import dialog_accepted, ElidingChip, SliderWithValue
+from this_voice_thing.ui.widgets import ElidingChip
+from this_voice_thing.ui.widgets import SliderWithValue
+from this_voice_thing.ui.widgets import dialog_accepted
 
 
 class GeneratePage:
+    """The Generate page: cards and the generation run. Mixed into ChatterboxApp."""
+
     """The Generate page: text, documents, estimates, generation and finishing. Mixed into ChatterboxApp."""
 
     def _build_generate_page(self):
@@ -79,6 +69,13 @@ class GeneratePage:
         voice_row.addWidget(self.model_repo_combo)
         generate_layout.addLayout(voice_row)
 
+        generate_layout.addWidget(self._build_text_card(), 3)
+        self._build_engine_rows()
+        generate_layout.addWidget(self._build_delivery_card())
+        generate_layout.addWidget(self._build_player_card(), 2)
+        self.pages.addWidget(generate_page)
+
+    def _build_text_card(self):
         text_card, text_card_layout = self._make_card()
         text_header = QHBoxLayout()
         text_title = QLabel("Text")
@@ -187,84 +184,9 @@ class GeneratePage:
         self.generate_button.setMinimumWidth(140)
         generate_actions_layout.addWidget(self.generate_button)
         text_card_layout.addLayout(generate_actions_layout)
-        generate_layout.addWidget(text_card, 3)
+        return text_card
 
-        # Qwen controls share Delivery's first row with the Chatterbox-only sliders,
-        # so switching engines never changes the window's minimum height.
-        self.qwen_row = QWidget()
-        qwen_row_layout = QHBoxLayout(self.qwen_row)
-        qwen_row_layout.setContentsMargins(0, 0, 0, 0)
-        qwen_row_layout.setSpacing(10)
-        qwen_settings = self.app_settings.get("qwen", {})
-        self.qwen_speaker_combo = QComboBox()
-        # Kokoro's voice names are long ("Heart (US English, female)"); the list opens wide
-        # anyway, so the box itself stays compact instead of widening the window.
-        self.qwen_speaker_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.qwen_speaker_combo.setMinimumContentsLength(14)
-        self.qwen_speaker_combo.view().setMinimumWidth(260)
-        self.qwen_speaker_combo.setToolTip("Built-in Qwen speaker.")
-        self.qwen_speaker_combo.currentIndexChanged.connect(lambda _i: self.refresh_voice_chip())
-        self.qwen_speaker_label = QLabel("Speaker")
-        qwen_row_layout.addWidget(self.qwen_speaker_label)
-        qwen_row_layout.addWidget(self.qwen_speaker_combo)
-        self.qwen_instruct_input = QLineEdit()
-        self.qwen_instruct_label = QLabel("Style")
-        qwen_row_layout.addWidget(self.qwen_instruct_label)
-        qwen_row_layout.addWidget(self.qwen_instruct_input, 1)
-        self.design_attributes_button = self._link(QPushButton("Attributes\u2026"))
-        self.design_attributes_button.setToolTip("Pick the voice's gender, age, pitch, accent and more.")
-        attributes_menu = QMenu(self)
-        # Keep Python references: PySide can otherwise free submenus made by addMenu(title).
-        self.design_attribute_menus = [attributes_menu]
-        for group, items in omnivoice_engine.DESIGN_ATTRIBUTES.items():
-            submenu = QMenu(group, attributes_menu)
-            attributes_menu.addMenu(submenu)
-            self.design_attribute_menus.append(submenu)
-            for item in items:
-                action = submenu.addAction(item)
-                action.triggered.connect(lambda _checked=False, item=item: self.qwen_instruct_input.setText(
-                    omnivoice_engine.set_attribute(self.qwen_instruct_input.text(), item)))
-        attributes_menu.addSeparator()
-        attributes_menu.addAction("Clear").triggered.connect(lambda: self.qwen_instruct_input.clear())
-        self.design_attributes_button.setMenu(attributes_menu)
-        self.design_attributes_button.setVisible(False)
-        qwen_row_layout.addWidget(self.design_attributes_button)
-        self.qwen_transcript_label = QLabel("Clip transcript")
-        self.qwen_transcript_input = QLineEdit()
-        self.qwen_transcript_input.setPlaceholderText(
-            "What is said in the reference clip (optional, improves likeness)")
-        self.qwen_transcript_input.setToolTip(
-            "With a transcript, Qwen and VoxCPM clone more closely. It must match what is said in "
-            "the clip: a wrong transcript can garble VoxCPM's output. Recordings made with "
-            "Record... fill this in with the passage you read; edit it if you said something different.")
-        self.qwen_transcript_input.editingFinished.connect(self.save_reference_transcript)
-        qwen_row_layout.addWidget(self.qwen_transcript_label)
-        qwen_row_layout.addWidget(self.qwen_transcript_input, 1)
-        self.cast_label = QLabel()
-        self.cast_label.setObjectName("Muted")
-        self.cast_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.cast_button = QPushButton("Cast\u2026")
-        self.cast_button.setToolTip("Choose a voice for each speaker in the script.")
-        self.cast_button.clicked.connect(self.edit_cast)
-        self.cast_title = QLabel("Speakers")
-        for widget in (self.cast_title, self.cast_label, self.cast_button):
-            widget.setVisible(False)
-        qwen_row_layout.addWidget(self.cast_title)
-        qwen_row_layout.addWidget(self.cast_label, 1)
-        qwen_row_layout.addWidget(self.cast_button)
-        self.qwen_watermark_checkbox = QCheckBox("Add AI watermark")
-        self.qwen_watermark_checkbox.setChecked(bool(qwen_settings.get("watermark", True)))
-        self.qwen_watermark_checkbox.setToolTip(
-            "Qwen and Kokoro don't watermark their audio. When ticked, the same inaudible Perth watermark "
-            "Chatterbox uses is added, so output from every engine is marked the same way.")
-        self.qwen_settings = qwen_settings
-        self.kokoro_settings = self.app_settings.get("kokoro", {})
-        self.voxcpm_settings = self.app_settings.get("voxcpm", {})
-        self.omnivoice_settings = self.app_settings.get("omnivoice", {})
-        self.vibevoice_settings = self.app_settings.get("vibevoice", {})
-        self.qwen_row.setVisible(False)
-        self.qwen_watermark_checkbox.setVisible(False)
-
+    def _build_delivery_card(self):
         delivery_card, delivery_layout = self._make_card("Delivery")
         delivery_layout.addWidget(self.qwen_row)
         params_layout = QGridLayout()
@@ -314,125 +236,8 @@ class GeneratePage:
         delivery_hint.setObjectName("Muted")
         delivery_hint.setToolTip("Advanced sampling options are under Model > Sampling.")
         delivery_layout.addWidget(delivery_hint)
-
-        finishing_header = QHBoxLayout()
-        self.finishing_toggle = self._link(QPushButton())
-        self.finishing_toggle.setToolTip("Adjustments applied to the audio after it is generated.")
-        self.finishing_toggle.clicked.connect(
-            lambda: self.set_finishing_expanded(self.finishing_panel.isHidden()))
-        finishing_header.addWidget(self.finishing_toggle)
-        self.finishing_summary_label = QLabel()
-        self.finishing_summary_label.setObjectName("Muted")
-        finishing_header.addWidget(self.finishing_summary_label)
-        finishing_header.addStretch(1)
-        delivery_layout.addLayout(finishing_header)
-
-        self.finishing_panel = QWidget()
-        finishing_grid = QGridLayout(self.finishing_panel)
-        finishing_grid.setContentsMargins(0, 0, 0, 0)
-        finishing_grid.setHorizontalSpacing(14)
-        finishing_grid.setColumnStretch(1, 1)
-        finishing_grid.setColumnStretch(3, 1)
-
-        def add_finishing(row, column, title, widget, tooltip):
-            label = QLabel(title)
-            label.setToolTip(tooltip)
-            widget.setToolTip(tooltip)
-            finishing_grid.addWidget(label, row, column)
-            finishing_grid.addWidget(widget, row, column + 1)
-
-        self.pause_slider = self._create_slider(
-            *audio_effects.PAUSE_RANGE, 0.1, 0.6, "{:.1f} s")
-        add_finishing(0, 0, "Paragraph pause", self.pause_slider,
-                      "Silence between paragraphs (headings get a little more). Pauses between "
-                      "sentences and inside long sentences are kept short and even automatically.")
-        self.output_format_combo = QComboBox()
-        self.output_format_combo.addItems(LOSSLESS_FORMATS)
-        add_finishing(0, 2, "Save as", self.output_format_combo,
-                      "WAV is uncompressed; FLAC is lossless and about half the size. "
-                      "MP3 is on the Advanced page.")
-        finishing_checks = QHBoxLayout()
-        self.even_volume_checkbox = QCheckBox("Even out volume")
-        self.even_volume_checkbox.setToolTip(
-            "Bring every result to a consistent, comfortable loudness without clipping.")
-        self.trim_silence_checkbox = QCheckBox("Trim silence")
-        self.trim_silence_checkbox.setToolTip(
-            "Remove dead air before the first word and after the last.")
-        finishing_checks.setSpacing(18)
-        self.subtitles_checkbox = QCheckBox("Save subtitles")
-        self.subtitles_checkbox.setToolTip(
-            "Also save captions timed to the audio, next to it (.srt, or .vtt: the format is on the "
-            "Advanced page). Timing comes from the generated sections and the pauses in them.")
-        finishing_checks.addWidget(self.even_volume_checkbox)
-        finishing_checks.addWidget(self.trim_silence_checkbox)
-        finishing_checks.addWidget(self.subtitles_checkbox)
-        finishing_checks.addStretch(1)
-        reset_finishing_button = QPushButton("Reset")
-        reset_finishing_button.setToolTip(
-            "Restore the default finishing settings (Advanced effects are kept).")
-        reset_finishing_button.clicked.connect(self.reset_finishing)
-        finishing_checks.addWidget(reset_finishing_button)
-        finishing_grid.addLayout(finishing_checks, 1, 0, 1, 4)
-        delivery_layout.addWidget(self.finishing_panel)
-        self.finishing_toggle.setToolTip(
-            "Adjustments applied to the audio after it is generated. Speed, pitch and MP3 "
-            "are on the Advanced page.")
-
-        self.pause_slider.slider.valueChanged.connect(self.update_finishing_summary)
-        self.output_format_combo.currentTextChanged.connect(self.update_finishing_summary)
-        self.even_volume_checkbox.toggled.connect(self.update_finishing_summary)
-        self.trim_silence_checkbox.toggled.connect(self.update_finishing_summary)
-        self.subtitles_checkbox.toggled.connect(self.update_finishing_summary)
-        generate_layout.addWidget(delivery_card)
-
-        player_card, player_layout = self._make_card()
-        player_header = QHBoxLayout()
-        player_title = QLabel("Player")
-        player_title.setObjectName("CardTitle")
-        player_header.addWidget(player_title)
-        player_header.addSpacing(12)
-        self.autoplay_checkbox = QCheckBox("Auto-play results")
-        self.autoplay_checkbox.setChecked(True)
-        player_header.addWidget(self.autoplay_checkbox)
-        player_header.addStretch(1)
-        self.current_file_label = QLabel("Currently playing: None")
-        self.current_file_label.setObjectName("Muted")
-        player_header.addWidget(self.current_file_label)
-        player_layout.addLayout(player_header)
-        player_controls_layout = QHBoxLayout()
-        self.play_pause_button = QPushButton("Play")
-        self.play_pause_button.clicked.connect(self.toggle_play_pause)
-        self.play_pause_button.setEnabled(False)
-        self.play_pause_button.setMinimumWidth(80)
-        player_controls_layout.addWidget(self.play_pause_button)
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.clicked.connect(self.stop_audio)
-        self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumWidth(80)
-        player_controls_layout.addWidget(self.stop_button)
-        self.current_time_label = QLabel("00:00")
-        self.playhead_slider = QSlider(Qt.Orientation.Horizontal)
-        self.playhead_slider.sliderPressed.connect(self.slider_pressed)
-        self.playhead_slider.sliderMoved.connect(self.seek_audio_on_move)
-        self.playhead_slider.sliderReleased.connect(self.slider_released)
-        self.playhead_slider.setEnabled(False)
-        self.duration_label = QLabel("00:00")
-        player_controls_layout.addSpacing(8)
-        player_controls_layout.addWidget(self.current_time_label)
-        player_controls_layout.addWidget(self.playhead_slider, 1)
-        player_controls_layout.addWidget(self.duration_label)
-        player_layout.addLayout(player_controls_layout)
-        history_label = QLabel("Generated files (double-click to play)")
-        history_label.setObjectName("Muted")
-        player_layout.addWidget(history_label)
-        self.output_log_listwidget = QListWidget()
-        self.output_log_listwidget.itemDoubleClicked.connect(
-            self.play_selected_from_log)
-        self.output_log_listwidget.setMinimumHeight(70)
-        self.output_log_listwidget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        player_layout.addWidget(self.output_log_listwidget, 1)
-        generate_layout.addWidget(player_card, 2)
-        self.pages.addWidget(generate_page)
+        self._build_finishing_panel(delivery_layout)
+        return delivery_card
 
     def handle_generate_stop_toggle(self):
         if not self.is_generating:
@@ -573,334 +378,8 @@ class GeneratePage:
             self.keep_take_button.setVisible(False)
             self.activity_label.setText(f"Take {self.last_preview_seed} locked")
 
-    # --- Documents ---
-
-    def open_document(self):
-        start_dir = self.app_settings.get("last_document_dir") or os.path.expanduser("~")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Document", start_dir, documents.DOCUMENT_FILTER)
-        if not path:
-            return
-        try:
-            text = documents.load_document(path)
-        except Exception as exc:
-            QMessageBox.warning(self, "Could Not Open Document",
-                                f"{os.path.basename(path)} could not be read:\n{exc}")
-            return
-        if not text:
-            QMessageBox.warning(self, "Empty Document",
-                                f"No readable text was found in {os.path.basename(path)}.")
-            return
-        self.app_settings["last_document_dir"] = os.path.dirname(path)
-        self.show_document(text, os.path.basename(path), documents.safe_file_stem(path))
-
-    def show_document(self, text, label, file_stem):
-        self.text_input.setPlainText(text)
-        self.current_document_name = file_stem
-        self.document_label.setText(label)
-        self.update_text_stats()
-        self.set_status_message(f"Status: Loaded {label}. Try Preview before generating.")
-
-    def open_google_doc(self):
-        dialog = GoogleDocsDialog(self.google_account, self)
-        if not dialog_accepted(dialog.exec()) or not dialog.result_docx:
-            return
-        data, title = dialog.result_docx
-        path = os.path.join(tempfile.gettempdir(), "google_doc_import.docx")
-        try:
-            with open(path, "wb") as handle:
-                handle.write(data)
-            text = documents.load_document(path)
-        except Exception as exc:
-            QMessageBox.warning(self, "Google Docs", f"\u201c{title}\u201d couldn't be read:\n{exc}")
-            return
-        finally:
-            if os.path.exists(path):
-                os.remove(path)
-        if not text:
-            QMessageBox.warning(self, "Google Docs", f"No readable text was found in \u201c{title}\u201d.")
-            return
-        self.show_document(text, f"{title} (Google Docs)", documents.safe_file_stem(title + ".docx"))
-
-    def on_text_changed(self):
-        if not self.text_input.toPlainText().strip():
-            self.current_document_name = None
-            self.document_label.clear()
-        self.text_stats_timer.start()
-
-    def speed_device(self):
-        if self.model is not None:
-            return self.device_used
-        return "cuda" if torch.cuda.is_available() else "cpu"
-
-    def speed_key(self, entry):
-        variant = entry.get("qwen_variant") or entry.get("multilingual_t3_model") or ""
-        if self.batch_size_for(entry) > 1:
-            variant += f"|batch{self.batch_size_for(entry)}"
-        return f"{self.speed_device()}|{entry.get('repo_id')}|{entry.get('backend')}|{variant}"
-
-    def seconds_per_char_for(self, entry):
-        """(seconds per character, measured?) for an entry on the current device."""
-        device = self.speed_device()
-        measured = self.app_settings.get("speed_by_model", {}).get(self.speed_key(entry))
-        if measured:
-            return measured, True
-        engine = entry.get("backend") if entry.get("backend") in ENGINE_MODULES else "chatterbox"
-        if engine == "chatterbox":
-            legacy = self.app_settings.get("seconds_per_char", {}).get(device)  # older single rate
-            if legacy:
-                return legacy, False
-        return DEFAULT_SECONDS_PER_CHAR.get((engine, device), 0.35), False
-
-    def loaded_entry(self):
-        return next((e for e in self.model_entries if self.entry_key(e) == self.loaded_entry_key()), None)
-
-    def batch_size_for(self, entry):
-        module = ENGINE_MODULES.get(entry.get("backend"))
-        if module is not None and hasattr(module, "BATCH_SIZE") and self.speed_device() == "cuda":
-            return module.BATCH_SIZE
-        return 1
-
-    def batch_plan(self, entry, lengths):
-        """[(first, last, estimated seconds)] for generating sections of these lengths."""
-        rate, _measured = self.seconds_per_char_for(entry)
-        size = self.batch_size_for(entry)
-        budget = ENGINE_MODULES[entry["backend"]].BATCH_CHAR_BUDGET if size > 1 else None
-        plan = []
-        for start, end in documents.plan_batches(lengths, size, budget):
-            batch = lengths[start:end]
-            if size > 1:
-                cost = max(batch) * (1 + BATCH_COST_SLOPE * len(batch)) * rate
-            else:
-                cost = sum(batch) * rate
-            plan.append((start + 1, start + len(batch), cost))
-        return plan
-
-    def estimate_seconds(self, entry, lengths):
-        _rate, measured = self.seconds_per_char_for(entry)
-        return sum(cost for _first, _last, cost in self.batch_plan(entry, lengths)), measured
-
-    @staticmethod
-    def max_section_chars_for(entry):
-        if entry.get("backend") in ENGINE_MODULES:
-            return ENGINE_MODULES[entry["backend"]].MAX_SECTION_CHARS
-        return MAX_TEXT_INPUT_LENGTH
-
-    def split_text(self, text, entry):
-        """Section texts the way the entry's engine will generate them."""
-        if entry.get("backend") == VIBEVOICE_BACKEND:
-            return [section.text for section in
-                    documents.plan_script_sections(text, vibevoice_engine.MAX_SECTION_CHARS)]
-        return documents.split_into_sections(text, self.max_section_chars_for(entry))
-
-    def section_lengths(self, text, entry):
-        return [len(section) for section in self.split_text(text, entry)]
-
-    def model_estimates(self, text):
-        """[(entry, seconds, measured, active)] for every model in the switcher, fastest first."""
-        rows = []
-        active_key = self.loaded_entry_key() if self.model is not None else None
-        lengths_by_size = {}
-        for entry in self.get_visible_model_entries():
-            size = (self.max_section_chars_for(entry), entry.get("backend") == VIBEVOICE_BACKEND)
-            if size not in lengths_by_size:
-                lengths_by_size[size] = self.section_lengths(text, entry)
-            seconds, measured = self.estimate_seconds(entry, lengths_by_size[size])
-            rows.append((entry, seconds, measured, self.entry_key(entry) == active_key))
-        return sorted(rows, key=lambda row: row[1])
-
-    def update_text_stats(self):
-        # Always current, including while a preview or render runs; a running
-        # render keeps using the text it started with.
-        self.refresh_cast_label()
-        text = self.text_input.toPlainText().strip()
-        if not text:
-            self.estimate_button.setVisible(False)
-            self.text_stats_label.setText("Type or paste text, or open a document.")
-            return
-        entry = self.loaded_entry() or self.get_selected_model_entry()
-        lengths = self.section_lengths(text, entry)
-        sections = len(lengths)
-        seconds, measured = self.estimate_seconds(entry, lengths)
-        self.estimate_button.setText(f"About {self.format_duration(seconds)} \u25be")
-        self.estimate_button.setVisible(True)
-        respelled = self.pronunciations.count_in(text)
-        self.text_stats_label.setText(
-            f"{sections} section{'s' if sections != 1 else ''} \u00b7 {len(text):,} characters"
-            + (f" \u00b7 {respelled} respelled" if respelled else ""))
-        self.text_stats_label.setToolTip(
-            "Words changed by the pronunciation dictionary (Advanced page)." if respelled else "")
-        visible = self.get_visible_model_entries()
-        for index in range(self.model_repo_combo.count()):
-            position = self.model_repo_combo.itemData(index)
-            if isinstance(position, int) and position < len(visible):
-                item_seconds, item_measured = self.estimate_seconds(
-                    visible[position], self.section_lengths(text, visible[position]))
-                self.model_repo_combo.setItemData(
-                    index,
-                    f"About {self.format_duration(item_seconds)} for the current text"
-                    f" ({'measured' if item_measured else 'estimate'})",
-                    Qt.ItemDataRole.ToolTipRole)
-
-    def show_estimate_menu(self):
-        text = self.text_input.toPlainText().strip()
-        if not text:
-            return
-        menu = QMenu(self)
-        header = menu.addAction(f"Time for this text ({len(text):,} characters), by model")
-        header.setEnabled(False)
-        menu.addSeparator()
-        estimates = {self.entry_key(e) + (e["label"],): row
-                     for row in self.model_estimates(text) for e in [row[0]]}
-        for _capability, title, members in model_registry.group_by_capability(self.get_visible_model_entries()):
-            menu.addSection(title)
-            rows = sorted((estimates[self.entry_key(e) + (e["label"],)] for e in members), key=lambda r: r[1])
-            for entry, seconds, measured, active in rows:
-                self._add_estimate_action(menu, entry, seconds, measured, active)
-        menu.addSeparator()
-        note = menu.addAction("Estimates become measurements once a model has generated a few sections.")
-        note.setEnabled(False)
-        menu.exec(self.estimate_button.mapToGlobal(self.estimate_button.rect().bottomLeft()))
-
-    def _add_estimate_action(self, menu, entry, seconds, measured, active):
-            marker = "\u25cf " if active else "    "
-            label = f"{marker}{entry['label']}  \u2014  about {self.format_duration(seconds)}"
-            label += "" if measured else "  (estimate)"
-            if not active:
-                label += "  + load"
-            action = menu.addAction(label)
-            action.setEnabled(not active and not self.is_generating and not getattr(self, "model_is_loading", False))
-            action.triggered.connect(lambda _checked=False, e=entry: self.switch_to_entry(e))
-
-    def switch_to_entry(self, entry):
-        index = self.model_repo_combo.findText(entry["label"])
-        if index >= 0:
-            self.model_repo_combo.setCurrentIndex(index)
-
-    def on_section_timed(self, characters, count, seconds):
-        # The first section after a load includes warm-up, so it isn't a fair sample.
-        if not self.model_is_warm:
-            self.model_is_warm = True
-            return
-        entry = self.loaded_entry()
-        if entry is None or characters < 20:
-            return
-        weight = characters
-        if self.batch_size_for(entry) > 1:
-            weight = characters * (1 + BATCH_COST_SLOPE * count)
-        measured = seconds / weight
-        rates = self.app_settings.setdefault("speed_by_model", {})
-        key = self.speed_key(entry)
-        previous = rates.get(key)
-        rates[key] = round(measured if previous is None else 0.7 * previous + 0.3 * measured, 5)
-
-    @staticmethod
-    def format_clock(seconds):
-        minutes, seconds = divmod(int(round(seconds)), 60)
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
-
-    @staticmethod
-    def format_duration(seconds):
-        seconds = int(round(seconds))
-        if seconds < 60:
-            return f"{max(seconds, 1)} s"
-        minutes, seconds = divmod(seconds, 60)
-        if minutes < 60:
-            return f"{minutes} min {seconds:02d} s" if minutes < 10 else f"{minutes} min"
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours} h {minutes:02d} min"
-
     def _create_slider(self, min_val, max_val, step_val, default_val, value_format="{:.2f}"):
         return SliderWithValue(min_val, max_val, step_val, default_val, value_format)
-
-    # --- Finishing touches ---
-
-    def current_finishing_settings(self):
-        return audio_effects.FinishingSettings(
-            speed=round(self.speed_slider.get_value(), 2),
-            pitch_semitones=round(self.pitch_slider.get_value(), 1),
-            paragraph_pause=round(self.pause_slider.get_value(), 1),
-            even_volume=self.even_volume_checkbox.isChecked(),
-            trim_silence=self.trim_silence_checkbox.isChecked(),
-            output_format="MP3" if self.mp3_checkbox.isChecked() else self.output_format_combo.currentText(),
-            save_subtitles=self.subtitles_checkbox.isChecked(),
-            subtitle_format=self.subtitle_format_combo.currentText(),
-        )
-
-    def apply_finishing_settings(self, settings):
-        self.speed_slider.set_value(settings.speed)
-        self.pitch_slider.set_value(settings.pitch_semitones)
-        self.pause_slider.set_value(settings.paragraph_pause)
-        self.even_volume_checkbox.setChecked(settings.even_volume)
-        self.trim_silence_checkbox.setChecked(settings.trim_silence)
-        self.mp3_checkbox.setChecked(settings.output_format == "MP3")
-        if settings.output_format in LOSSLESS_FORMATS:
-            self.output_format_combo.setCurrentText(settings.output_format)
-        self.subtitles_checkbox.setChecked(settings.save_subtitles)
-        self.subtitle_format_combo.setCurrentText(settings.subtitle_format)
-        self.update_finishing_summary()
-
-    def reset_finishing(self):
-        """Finishing touches only; Advanced effects are left as they are."""
-        defaults = audio_effects.FinishingSettings()
-        self.pause_slider.set_value(defaults.paragraph_pause)
-        self.even_volume_checkbox.setChecked(defaults.even_volume)
-        self.trim_silence_checkbox.setChecked(defaults.trim_silence)
-        self.output_format_combo.setCurrentText(defaults.output_format)
-        self.subtitles_checkbox.setChecked(defaults.save_subtitles)
-        self.update_finishing_summary()
-
-    def on_mp3_toggled(self, checked):
-        self.output_format_combo.setEnabled(not checked)
-        self.output_format_combo.setToolTip(
-            "MP3 is selected on the Advanced page." if checked else
-            "WAV is uncompressed; FLAC is lossless and about half the size. "
-            "MP3 is on the Advanced page.")
-        self.update_finishing_summary()
-
-    def update_finishing_summary(self, *_args):
-        if not hasattr(self, "subtitle_format_combo"):
-            return  # Advanced page not built yet
-        settings = self.current_finishing_settings()
-        summary = settings.summary()
-        advanced = (abs(settings.speed - 1.0) > 1e-6 or abs(settings.pitch_semitones) > 1e-6
-                    or settings.output_format == "MP3")
-        self.finishing_summary_label.setText(summary + ("  (effects on Advanced page)" if advanced else ""))
-
-    def set_finishing_expanded(self, expanded):
-        self.finishing_panel.setVisible(expanded)
-        arrow = "\u25be" if expanded else "\u25b8"
-        self.finishing_toggle.setText(f"{arrow} Finishing touches")
-        self.finishing_summary_label.setVisible(not expanded)
-        if self.isVisible():
-            self.update_minimum_size()
-
-    def on_tuning_changed(self, *_args):
-        self.repetition_penalty = self.repetition_spin.value()
-        self.min_p = self.min_p_spin.value()
-        self.top_p = self.top_p_spin.value()
-        self.app_settings["sampling"] = {
-            "repetition_penalty": self.repetition_penalty, "min_p": self.min_p, "top_p": self.top_p}
-        defaults = (abs(self.repetition_penalty - 1.2) < 1e-9 and abs(self.min_p - 0.05) < 1e-9
-                    and abs(self.top_p - 1.0) < 1e-9)
-        self.tuning_summary_label.setText("defaults" if defaults else
-                                          f"repetition {self.repetition_penalty:.2f}, "
-                                          f"min-p {self.min_p:.2f}, top-p {self.top_p:.2f}")
-
-    def reset_tuning(self):
-        self.repetition_spin.setValue(1.2)
-        self.min_p_spin.setValue(0.05)
-        self.top_p_spin.setValue(1.0)
-
-    def set_tuning_expanded(self, expanded):
-        self.tuning_panel.setVisible(expanded)
-        arrow = "\u25be" if expanded else "\u25b8"
-        self.tuning_toggle.setText(f"{arrow} Fine-tuning")
-        self.app_settings["tuning_expanded"] = expanded
-        self.on_tuning_changed()
-        if self.isVisible():
-            self.update_minimum_size()
 
     def refresh_language_options(self):
         selected_entry = self.get_selected_model_entry()

@@ -2,16 +2,24 @@
 
 import os
 
+from PySide6.QtWidgets import QCheckBox
+from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QHBoxLayout
+from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QMenu
 from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QWidget
 
 from this_voice_thing.core import documents
-from this_voice_thing.engines import (
-    kokoro as kokoro_engine,
-    omnivoice as omnivoice_engine,
-    vibevoice as vibevoice_engine,
-    voxcpm as voxcpm_engine,
-)
-from this_voice_thing.ui.common import DUAL_MODE_TYPES, WORKER_MODEL_TYPES
+from this_voice_thing.engines import kokoro as kokoro_engine
+from this_voice_thing.engines import omnivoice as omnivoice_engine
+from this_voice_thing.engines import vibevoice as vibevoice_engine
+from this_voice_thing.engines import voxcpm as voxcpm_engine
+from this_voice_thing.ui.common import DUAL_MODE_TYPES
+from this_voice_thing.ui.common import WORKER_MODEL_TYPES
 from this_voice_thing.ui.dialogs.voices import CastDialog
 from this_voice_thing.ui.widgets import dialog_accepted
 
@@ -251,3 +259,80 @@ class EngineControls:
             self.vibevoice_settings["cast"] = chosen
             self.app_settings["vibevoice"] = self.vibevoice_settings
             self.refresh_cast_label()
+
+    def _build_engine_rows(self):
+        # Qwen controls share Delivery's first row with the Chatterbox-only sliders,
+        # so switching engines never changes the window's minimum height.
+        self.qwen_row = QWidget()
+        qwen_row_layout = QHBoxLayout(self.qwen_row)
+        qwen_row_layout.setContentsMargins(0, 0, 0, 0)
+        qwen_row_layout.setSpacing(10)
+        qwen_settings = self.app_settings.get("qwen", {})
+        self.qwen_speaker_combo = QComboBox()
+        # Kokoro's voice names are long ("Heart (US English, female)"); the list opens wide
+        # anyway, so the box itself stays compact instead of widening the window.
+        self.qwen_speaker_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.qwen_speaker_combo.setMinimumContentsLength(14)
+        self.qwen_speaker_combo.view().setMinimumWidth(260)
+        self.qwen_speaker_combo.setToolTip("Built-in Qwen speaker.")
+        self.qwen_speaker_combo.currentIndexChanged.connect(lambda _i: self.refresh_voice_chip())
+        self.qwen_speaker_label = QLabel("Speaker")
+        qwen_row_layout.addWidget(self.qwen_speaker_label)
+        qwen_row_layout.addWidget(self.qwen_speaker_combo)
+        self.qwen_instruct_input = QLineEdit()
+        self.qwen_instruct_label = QLabel("Style")
+        qwen_row_layout.addWidget(self.qwen_instruct_label)
+        qwen_row_layout.addWidget(self.qwen_instruct_input, 1)
+        self.design_attributes_button = self._link(QPushButton("Attributes\u2026"))
+        self.design_attributes_button.setToolTip("Pick the voice's gender, age, pitch, accent and more.")
+        attributes_menu = QMenu(self)
+        # Keep Python references: PySide can otherwise free submenus made by addMenu(title).
+        self.design_attribute_menus = [attributes_menu]
+        for group, items in omnivoice_engine.DESIGN_ATTRIBUTES.items():
+            submenu = QMenu(group, attributes_menu)
+            attributes_menu.addMenu(submenu)
+            self.design_attribute_menus.append(submenu)
+            for item in items:
+                action = submenu.addAction(item)
+                action.triggered.connect(lambda _checked=False, item=item: self.qwen_instruct_input.setText(
+                    omnivoice_engine.set_attribute(self.qwen_instruct_input.text(), item)))
+        attributes_menu.addSeparator()
+        attributes_menu.addAction("Clear").triggered.connect(lambda: self.qwen_instruct_input.clear())
+        self.design_attributes_button.setMenu(attributes_menu)
+        self.design_attributes_button.setVisible(False)
+        qwen_row_layout.addWidget(self.design_attributes_button)
+        self.qwen_transcript_label = QLabel("Clip transcript")
+        self.qwen_transcript_input = QLineEdit()
+        self.qwen_transcript_input.setPlaceholderText(
+            "What is said in the reference clip (optional, improves likeness)")
+        self.qwen_transcript_input.setToolTip(
+            "With a transcript, Qwen and VoxCPM clone more closely. It must match what is said in "
+            "the clip: a wrong transcript can garble VoxCPM's output. Recordings made with "
+            "Record... fill this in with the passage you read; edit it if you said something different.")
+        self.qwen_transcript_input.editingFinished.connect(self.save_reference_transcript)
+        qwen_row_layout.addWidget(self.qwen_transcript_label)
+        qwen_row_layout.addWidget(self.qwen_transcript_input, 1)
+        self.cast_label = QLabel()
+        self.cast_label.setObjectName("Muted")
+        self.cast_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.cast_button = QPushButton("Cast\u2026")
+        self.cast_button.setToolTip("Choose a voice for each speaker in the script.")
+        self.cast_button.clicked.connect(self.edit_cast)
+        self.cast_title = QLabel("Speakers")
+        for widget in (self.cast_title, self.cast_label, self.cast_button):
+            widget.setVisible(False)
+        qwen_row_layout.addWidget(self.cast_title)
+        qwen_row_layout.addWidget(self.cast_label, 1)
+        qwen_row_layout.addWidget(self.cast_button)
+        self.qwen_watermark_checkbox = QCheckBox("Add AI watermark")
+        self.qwen_watermark_checkbox.setChecked(bool(qwen_settings.get("watermark", True)))
+        self.qwen_watermark_checkbox.setToolTip(
+            "Qwen and Kokoro don't watermark their audio. When ticked, the same inaudible Perth watermark "
+            "Chatterbox uses is added, so output from every engine is marked the same way.")
+        self.qwen_settings = qwen_settings
+        self.kokoro_settings = self.app_settings.get("kokoro", {})
+        self.voxcpm_settings = self.app_settings.get("voxcpm", {})
+        self.omnivoice_settings = self.app_settings.get("omnivoice", {})
+        self.vibevoice_settings = self.app_settings.get("vibevoice", {})
+        self.qwen_row.setVisible(False)
+        self.qwen_watermark_checkbox.setVisible(False)
