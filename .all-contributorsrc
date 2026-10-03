@@ -11,12 +11,16 @@
   "commitConvention": "none",
   "contributors": [
     {
-      "login": "lowkeytea",
-      "name": "lowkeytea",
-      "avatar_url": "https://avatars.githubusercontent.com/u/185973220?v=4",
-      "profile": "https://github.com/lowkeytea",
+      "login": "Knapp-Kevin",
+      "name": "Kevin Knapp",
+      "avatar_url": "https://avatars.githubusercontent.com/u/205245245?v=4",
+      "profile": "https://github.com/Knapp-Kevin",
       "contributions": [
-        "code"
+        "code",
+        "ideas",
+        "design",
+        "doc",
+        "projectManagement"
       ]
     }
   ],

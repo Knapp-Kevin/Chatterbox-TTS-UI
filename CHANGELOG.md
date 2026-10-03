@@ -7,6 +7,8 @@ All notable changes to **This Voice Thing**, which began as a fork of [AcTePuKc/
 Changes since upstream commit `22460fd` ("Add best-effort macOS/Linux shell launcher flow").
 
 ### Added
+- **Transcription (speech to text).** A new **Transcribe** page turns audio into text locally with OpenAI's Whisper large-v3 turbo (MIT license, a one-time 1.6 GB download the app asks about first). Detects the language or takes one you pick, shows optional timestamps, saves text or SRT/WebVTT subtitles, and **Send to Generate** speaks the result with any voice. **Transcribe clip** in a library voice's menu fills in its transcript for cloning models, and the local API adds an OpenAI-compatible `POST /v1/audio/transcriptions`.
+- **App icon in the Windows taskbar.** The app now shows its own icon there instead of Python's, and `assets/branding/this-voice-thing.ico` is available for shortcuts.
 - **Qwen3-TTS engine (optional).** Three new models alongside Chatterbox:
   - **Preset voices**, with nine speakers and plain-language style instructions.
   - **Voice design**, which creates a voice from a written description.

@@ -6,6 +6,7 @@ raise ApiError):
 
   health() -> dict             models() -> list         voices() -> list
   synthesize(request: dict) -> dict with "path", "mime", plus details
+  transcribe(audio: bytes, filename, language) -> transcription.Transcript
 
 Endpoints
   GET  /v1/health        what's loaded, and whether a request is running
@@ -16,8 +17,13 @@ Endpoints
   POST /v1/speech        native: {"text", "model", "voice", "format", "subtitles",
                          "speed", "language", "style", "name"} -> JSON with the saved
                          files (chatterbox_outputs/api/) and details
+  POST /v1/audio/transcriptions  OpenAI-compatible speech to text: multipart form
+                         with "file", optional "language", "response_format"
+                         (json, text, srt, vtt, verbose_json); Whisper runs locally
 """
 
+import email.parser
+import email.policy
 import json
 import os
 import threading
@@ -25,6 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8765
 MAX_BODY = 4 * 1024 * 1024
+MAX_AUDIO_BODY = 100 * 1024 * 1024
+TRANSCRIPT_FORMATS = ("json", "text", "srt", "vtt", "verbose_json")
 OPENAI_FORMATS = {"wav": "WAV", "flac": "FLAC", "mp3": "MP3"}
 
 
@@ -118,6 +126,16 @@ class _Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "The body must be a JSON object.")
         return data
 
+    def _read_form(self):
+        """A multipart/form-data body as ({field: text}, {field: (filename, bytes)})."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_AUDIO_BODY:
+            raise ApiError(413, "The upload is too large (100 MB max).")
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data"):
+            raise ApiError(400, "Send the audio as multipart/form-data with a \"file\" field.")
+        return parse_multipart(content_type, self.rfile.read(length) if length else b"")
+
     def do_GET(self):
         self._route("GET")
 
@@ -142,6 +160,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._openai_speech(self._read_json())
             elif method == "POST" and path == "/v1/speech":
                 self._native_speech(self._read_json())
+            elif method == "POST" and path == "/v1/audio/transcriptions":
+                self._transcription(*self._read_form())
             else:
                 raise ApiError(404, f"No endpoint {method} {path}. See GET /v1/health.", "not_found")
         except ApiError as error:
@@ -184,6 +204,71 @@ class _Handler(BaseHTTPRequestHandler):
             "subtitles": data.get("subtitles"), "save": True, "name": data.get("name"),
         })
         self._send_json(200, {key: value for key, value in result.items() if key not in ("mime", "temporary")})
+
+
+    # --- transcription ---
+
+    def _transcription(self, fields, files):
+        if "file" not in files:
+            raise ApiError(400, "\"file\" is required (the audio to transcribe).")
+        filename, audio = files["file"]
+        if not audio:
+            raise ApiError(400, "The uploaded file is empty.")
+        response_format = (fields.get("response_format") or "json").strip().lower()
+        if response_format not in TRANSCRIPT_FORMATS:
+            raise ApiError(400, f"response_format must be one of {', '.join(TRANSCRIPT_FORMATS)}.")
+        language = (fields.get("language") or "auto").strip().lower() or "auto"
+        transcript = self.api.backend.transcribe(audio, filename, language)
+        status, body, mime = format_transcript(transcript, response_format)
+        if mime == "application/json":
+            self._send_json(status, body)
+        else:
+            payload = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+
+def parse_multipart(content_type, body):
+    """Split a multipart/form-data body into text fields and uploaded files."""
+    message = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body)
+    if not message.is_multipart():
+        raise ApiError(400, "Couldn't read the multipart form.")
+    fields, files = {}, {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        if filename is not None:
+            files[name] = (filename, data)
+        else:
+            fields[name] = data.decode(part.get_content_charset() or "utf-8", "replace")
+    return fields, files
+
+
+def format_transcript(transcript, response_format):
+    """(status, body, mime) for an OpenAI-style transcription response."""
+    from this_voice_thing.core import subtitles, transcription
+    if response_format == "text":
+        return 200, transcript.text + "\n", "text/plain; charset=utf-8"
+    if response_format in ("srt", "vtt"):
+        cues = transcription.to_cues(transcript)
+        if response_format == "vtt":
+            return 200, subtitles.to_vtt(cues), "text/vtt; charset=utf-8"
+        return 200, subtitles.to_srt(cues), "text/plain; charset=utf-8"
+    if response_format == "verbose_json":
+        return 200, {
+            "task": transcript.task, "language": transcript.language, "duration": round(transcript.seconds, 2),
+            "text": transcript.text,
+            "segments": [{"id": index, "start": round(segment.start, 2), "end": round(segment.end, 2),
+                          "text": segment.text} for index, segment in enumerate(transcript.segments)],
+        }, "application/json"
+    return 200, {"text": transcript.text}, "application/json"
 
 
 def _cleanup(result):

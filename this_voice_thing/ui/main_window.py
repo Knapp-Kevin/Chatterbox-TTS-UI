@@ -2,6 +2,7 @@
 
 import sys
 import os
+import re
 import io
 import contextlib
 import datetime
@@ -140,6 +141,7 @@ from this_voice_thing.ui import theme as ui_theme
 from this_voice_thing.core import audio_effects
 from this_voice_thing.core import subtitles
 from this_voice_thing.core import pronunciation
+from this_voice_thing.core import transcription
 from this_voice_thing.integrations import local_api
 from this_voice_thing.integrations import google_docs
 import threading
@@ -1718,6 +1720,27 @@ class ApiBridge(QObject):
         finally:
             self.job_lock.release()
 
+    def transcribe(self, audio, filename, language):
+        if not transcription.is_downloaded():
+            raise local_api.ApiError(409, "Whisper isn't downloaded yet. Transcribe something once on the app's "
+                                          "Transcribe page to download it (about 1.6 GB).")
+        if language != "auto" and language not in transcription.LANGUAGES:
+            raise local_api.ApiError(400, f"Unknown language {language!r}; use a code such as en, es or ja, or auto.")
+        suffix = os.path.splitext(filename or "")[1].lower() or ".wav"
+        handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        try:
+            handle.write(audio)
+            handle.close()
+            try:
+                return self.app.transcriber.transcribe(handle.name, language)
+            except Exception as exc:
+                raise local_api.ApiError(400, f"Couldn't transcribe that audio: {type(exc).__name__}: {exc}")
+        finally:
+            try:
+                os.remove(handle.name)
+            except OSError:
+                pass
+
     def _generate(self, job):
         outcome = {}
         thread = AudioGeneratorThread(**job["generator"])
@@ -1968,6 +1991,22 @@ class GoogleDocsDialog(QDialog):
         super().reject()
 
 
+class TranscribeThread(QThread):
+    """Runs Whisper off the UI thread."""
+
+    done = Signal(object, str)  # Transcript or None, error
+
+    def __init__(self, transcriber, source, language, task, parent=None):
+        super().__init__(parent)
+        self.transcriber, self.source, self.language, self.task = transcriber, source, language, task
+
+    def run(self):
+        try:
+            self.done.emit(self.transcriber.transcribe(self.source, self.language, self.task), "")
+        except Exception as exc:
+            self.done.emit(None, f"{type(exc).__name__}: {exc}")
+
+
 class SpeakThread(QThread):
     """Speak a short text with the loaded model (for trying respellings)."""
 
@@ -2128,6 +2167,8 @@ class ChatterboxApp(QMainWindow):
         self.api_busy = False
         self.api_loading_entry = None
         self.google_account = google_docs.GoogleAccount(self.script_dir)
+        self.transcriber = transcription.Transcriber()
+        self.transcript = None
         self.active_voice_id = None
         self.pending_voice = None
         self.media_devices = QMediaDevices(self)
@@ -2194,7 +2235,7 @@ class ChatterboxApp(QMainWindow):
             self.generate_button.setEnabled(False)
         QTimer.singleShot(0, self.restart_api_server)
 
-    PAGE_GENERATE, PAGE_VOICE, PAGE_MODEL, PAGE_ADVANCED, PAGE_LOG = range(5)
+    PAGE_GENERATE, PAGE_VOICE, PAGE_TRANSCRIBE, PAGE_MODEL, PAGE_ADVANCED, PAGE_LOG = range(6)
 
     def _make_card(self, title=None):
         card = ui_theme.CardFrame()
@@ -2253,7 +2294,7 @@ class ChatterboxApp(QMainWindow):
         self.sidebar.setObjectName("Sidebar")
         self.sidebar.setFixedWidth(180)
         self.sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for label in ("Generate", "Voice", "Model", "Advanced", "Log"):
+        for label in ("Generate", "Voice", "Transcribe", "Model", "Advanced", "Log"):
             self.sidebar.addItem(QListWidgetItem(label))
         title_row = QHBoxLayout()
         title_row.setContentsMargins(18, 16, 12, 10)
@@ -2735,6 +2776,78 @@ class ChatterboxApp(QMainWindow):
         library_layout.addLayout(library_actions)
         voice_layout.addWidget(library_card, 1)
         self.pages.addWidget(voice_page)
+
+        # ---------- Transcribe page ----------
+        transcribe_page, transcribe_layout = self._make_page(
+            "Transcribe", "Speech to text, on this PC, with Whisper.")
+        audio_card, audio_layout = self._make_card("Audio")
+        audio_row = QHBoxLayout()
+        self.transcribe_source_label = QLabel("No audio chosen.")
+        self.transcribe_source_label.setObjectName("Muted")
+        self.transcribe_source_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        audio_row.addWidget(self.transcribe_source_label, 1)
+        use_clip_button = self._link(QPushButton("Use current voice clip"))
+        use_clip_button.setToolTip("Transcribe the reference clip selected on the Voice page.")
+        use_clip_button.clicked.connect(self.transcribe_use_voice_clip)
+        audio_row.addWidget(use_clip_button)
+        open_audio_button = QPushButton("Open audio...")
+        open_audio_button.setToolTip("WAV, FLAC, OGG or MP3; M4A/AAC and others need FFmpeg.")
+        open_audio_button.clicked.connect(self.transcribe_open_audio)
+        audio_row.addWidget(open_audio_button)
+        audio_layout.addLayout(audio_row)
+        options_row = QHBoxLayout()
+        options_row.addWidget(QLabel("Language"))
+        self.transcribe_language_combo = QComboBox()
+        for code, name in transcription.LANGUAGES.items():
+            self.transcribe_language_combo.addItem(name, code)
+        self.transcribe_language_combo.setToolTip("Whisper detects the language by itself; pick one if it guesses wrong.")
+        options_row.addWidget(self.transcribe_language_combo)
+        self.transcribe_timestamps_checkbox = QCheckBox("Timestamps")
+        self.transcribe_timestamps_checkbox.setToolTip("Show when each passage starts, e.g. [1:05].")
+        self.transcribe_timestamps_checkbox.toggled.connect(lambda _on: self.show_transcript())
+        options_row.addWidget(self.transcribe_timestamps_checkbox)
+        options_row.addStretch(1)
+        self.transcribe_button = self._accent(QPushButton("Transcribe"))
+        self.transcribe_button.setEnabled(False)
+        self.transcribe_button.clicked.connect(self.start_transcription)
+        options_row.addWidget(self.transcribe_button)
+        audio_layout.addLayout(options_row)
+        self.transcribe_progress = QProgressBar()
+        self.transcribe_progress.setRange(0, 0)
+        self.transcribe_progress.setFixedHeight(6)
+        self.transcribe_progress.setTextVisible(False)
+        self.transcribe_progress.setVisible(False)
+        audio_layout.addWidget(self.transcribe_progress)
+        transcribe_layout.addWidget(audio_card)
+        text_card_t, text_layout_t = self._make_card("Text")
+        self.transcript_output = QPlainTextEdit()
+        self.transcript_output.setPlaceholderText("The transcript appears here. You can edit it before saving or sending it.")
+        text_layout_t.addWidget(self.transcript_output, 1)
+        self.transcribe_status = QLabel()
+        self.transcribe_status.setObjectName("Muted")
+        self.transcribe_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_layout_t.addWidget(self.transcribe_status)
+        result_row = QHBoxLayout()
+        copy_button = QPushButton("Copy")
+        copy_button.clicked.connect(lambda: (QApplication.clipboard().setText(self.transcript_output.toPlainText()),
+                                             self.set_status_message("Status: Copied the transcript.")))
+        result_row.addWidget(copy_button)
+        save_text_button = QPushButton("Save text...")
+        save_text_button.clicked.connect(self.save_transcript_text)
+        result_row.addWidget(save_text_button)
+        self.save_subtitles_button = QPushButton("Save subtitles...")
+        self.save_subtitles_button.setToolTip("SRT or WebVTT, timed from the audio.")
+        self.save_subtitles_button.clicked.connect(self.save_transcript_subtitles)
+        result_row.addWidget(self.save_subtitles_button)
+        result_row.addStretch(1)
+        send_button = self._link(QPushButton("Send to Generate"))
+        send_button.setToolTip("Put this text on the Generate page, to speak it with any voice.")
+        send_button.clicked.connect(self.send_transcript_to_generate)
+        result_row.addWidget(send_button)
+        text_layout_t.addLayout(result_row)
+        transcribe_layout.addWidget(text_card_t, 1)
+        self.pages.addWidget(transcribe_page)
+        self.transcribe_source = None
 
         # ---------- Model page ----------
         model_page, model_layout = self._make_page(
@@ -3975,6 +4088,141 @@ class ChatterboxApp(QMainWindow):
         self.model_repo_combo.setEnabled(not getattr(self, "model_is_loading", False))
         self.set_status_message("Status: Finished a local API request. Ready.")
 
+    # --- Transcription ---
+
+    def set_transcribe_source(self, path):
+        self.transcribe_source = path
+        saved = self.voice_library.find_clip(path) if path else None
+        label = saved.name if saved else os.path.basename(path) if path else "No audio chosen."
+        self.transcribe_source_label.setText(label)
+        self.transcribe_source_label.setToolTip(path or "")
+        self.transcribe_button.setEnabled(bool(path))
+
+    def transcribe_open_audio(self):
+        start = self.app_settings.get("last_transcribe_dir") or self.last_reference_audio_dir
+        path, _filter = QFileDialog.getOpenFileName(self, "Open audio to transcribe", start, transcription.AUDIO_FILTER)
+        if path:
+            self.app_settings["last_transcribe_dir"] = os.path.dirname(path)
+            self.set_transcribe_source(path)
+
+    def transcribe_use_voice_clip(self):
+        path = self.ref_audio_path_label.toolTip()
+        if not path:
+            QMessageBox.information(self, "Transcribe", "Pick a voice clip on the Voice page first.")
+            return
+        self.set_transcribe_source(path)
+
+    def confirm_whisper_download(self):
+        if transcription.is_downloaded():
+            return True
+        answer = QMessageBox.question(
+            self, "Transcription",
+            f"Transcription uses OpenAI's {transcription.MODEL_LABEL} (MIT license). It runs on this PC; "
+            f"the model downloads once, about {model_registry.format_size(transcription.DOWNLOAD_BYTES)}.\n\n"
+            "Download it now?")
+        return answer == QMessageBox.StandardButton.Yes
+
+    def run_transcription(self, source, language, task, on_done, status):
+        if getattr(self, "transcribe_thread", None) is not None and self.transcribe_thread.isRunning():
+            self.set_status_message("Status: A transcription is already running.")
+            return False
+        if not self.confirm_whisper_download():
+            return False
+        self.set_status_message(status)
+        self.transcribe_thread = TranscribeThread(self.transcriber, source, language, task, self)
+        self.transcribe_thread.done.connect(on_done)
+        self.transcribe_thread.start()
+        return True
+
+    def start_transcription(self):
+        if not self.transcribe_source:
+            return
+        started = time.monotonic()
+
+        def done(transcript, error):
+            self.transcribe_progress.setVisible(False)
+            self.transcribe_button.setEnabled(True)
+            if error:
+                self.transcribe_status.setText(f"Couldn't transcribe: {error}")
+                ui_theme.set_tone(self.transcribe_status, "error")
+                self.set_status_message("Status: Transcription failed. See the Log page.")
+                return
+            self.transcript = transcript
+            self.show_transcript()
+            ui_theme.set_tone(self.transcribe_status, "")
+            self.transcribe_status.setText(
+                f"{self.format_duration(transcript.seconds)} of audio in "
+                f"{self.format_duration(time.monotonic() - started)} \u00b7 {len(transcript.segments)} passage{'s' if len(transcript.segments) != 1 else ''} "
+                f"\u00b7 {transcription.MODEL_LABEL} on {self.transcriber.device}")
+            self.set_status_message("Status: Transcription ready.")
+
+        language = self.transcribe_language_combo.currentData()
+        if self.run_transcription(self.transcribe_source, language, "transcribe", done,
+                                  "Status: Transcribing (the first time also loads Whisper)..."):
+            self.transcribe_button.setEnabled(False)
+            self.transcribe_progress.setVisible(True)
+            self.transcribe_status.setText("Transcribing...")
+
+    def show_transcript(self):
+        if self.transcript is None:
+            return
+        self.transcript_output.setPlainText(
+            transcription.timestamped_text(self.transcript)
+            if self.transcribe_timestamps_checkbox.isChecked() and self.transcript.segments else self.transcript.text)
+        self.save_subtitles_button.setEnabled(bool(self.transcript.segments))
+
+    def transcript_stem(self):
+        return documents.safe_file_stem(os.path.splitext(os.path.basename(self.transcribe_source or "transcript"))[0])
+
+    def save_transcript_text(self):
+        text = self.transcript_output.toPlainText().strip()
+        if not text:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save transcript", os.path.join(self.output_directory, self.transcript_stem() + ".txt"), "Text (*.txt)")
+        if path:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+            self.set_status_message(f"Status: Saved {os.path.basename(path)}.")
+
+    def save_transcript_subtitles(self):
+        if self.transcript is None or not self.transcript.segments:
+            return
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Save subtitles", os.path.join(self.output_directory, self.transcript_stem() + ".srt"),
+            "SubRip (*.srt);;WebVTT (*.vtt)")
+        if path:
+            subtitle_format = "WebVTT" if path.lower().endswith(".vtt") or "vtt" in chosen.lower() else "SRT"
+            saved = subtitles.save(os.path.splitext(path)[0], transcription.to_cues(self.transcript), subtitle_format)
+            self.set_status_message(f"Status: Saved {os.path.basename(saved)}.")
+
+    def send_transcript_to_generate(self):
+        # Speak the words, not the "[1:05]" timestamps.
+        text = re.sub(r"(?m)^\[\d+:\d\d\]\s*", "", self.transcript_output.toPlainText()).strip()
+        if not text:
+            return
+        self.text_input.setPlainText(text)
+        self.current_document_name = None
+        self.document_label.setText("From Transcribe")
+        self.sidebar.setCurrentRow(self.PAGE_GENERATE)
+        self.set_status_message("Status: Transcript sent to Generate.")
+
+    def transcribe_voice_clip(self, voice):
+        """Fill in a library clip's transcript (cloning models such as OmniVoice need one)."""
+        path = self.voice_library.clip_path(voice)
+
+        def done(transcript, error):
+            if error or transcript is None:
+                self.set_status_message(f"Status: Couldn't transcribe {voice.name}: {error}")
+                return
+            voice_library.write_transcript(path, transcript.text)
+            if self.voice_is_active(voice):
+                self.load_reference_transcript(path)
+            self.render_voice_tiles()
+            self.set_status_message(f"Status: Transcribed {voice.name}. Check it with Edit... if a word is off.")
+
+        self.run_transcription(path, "auto", "transcribe", done, f"Status: Transcribing {voice.name}...")
+
     # --- Pronunciation dictionary ---
 
     def update_pronunciation_summary(self):
@@ -4306,6 +4554,10 @@ class ChatterboxApp(QMainWindow):
             ("Stop preview" if playing else "Preview clip", lambda: self.preview_voice(voice),
              bool(path) and os.path.exists(path)),
         ]
+        if path and os.path.exists(path):
+            has_text = bool(voice_library.read_transcript(path))
+            entries.append(("Transcribe again" if has_text else "Transcribe clip",
+                            lambda: self.transcribe_voice_clip(voice), True))
         if voice.kind != "clip":
             entries.append(("Use as a clip voice", lambda: self.use_voice(voice, as_clip=True),
                             bool(path) and os.path.exists(path)))
@@ -5616,7 +5868,10 @@ class ChatterboxApp(QMainWindow):
 
 
 if __name__ == "__main__":
+    ui_theme.set_windows_app_id()
     app = QApplication(sys.argv)
+    app.setApplicationName(ui_theme.APP_NAME)
+    app.setApplicationDisplayName(ui_theme.APP_NAME)
     ui_theme.apply_theme(app)
     window = ChatterboxApp()
     window.show()
